@@ -1,5 +1,8 @@
 export type PresetKey = "web" | "whatsapp" | "thumbnail" | "hq";
-export type OutputFormat = "webp" | "avif" | "jpeg";
+export type OutputFormat = "webp" | "avif" | "jpeg" | "png";
+
+/** Formats that support transparency (alpha channel) */
+export const ALPHA_SAFE_FORMATS: OutputFormat[] = ["webp", "avif", "png"];
 
 export interface Preset {
   key: PresetKey;
@@ -62,13 +65,20 @@ export const TARGET_SIZES: { label: string; value: number }[] = [
   { label: "500 KB", value: 500 },
 ];
 
-export const OUTPUT_FORMATS: { label: string; value: OutputFormat; ext: string }[] = [
+export const OUTPUT_FORMATS: {
+  label: string;
+  value: OutputFormat;
+  ext: string;
+  lossless?: boolean;
+}[] = [
   { label: "WebP", value: "webp", ext: "webp" },
   { label: "AVIF", value: "avif", ext: "avif" },
   { label: "JPEG", value: "jpeg", ext: "jpg" },
+  { label: "PNG", value: "png", ext: "png", lossless: true },
 ];
 
-/** Resolves the extension for a given format */
+/** Resolves the file extension for a given format */
 export function formatExt(format: OutputFormat): string {
-  return format === "jpeg" ? "jpg" : format;
+  if (format === "jpeg") return "jpg";
+  return format; // webp, avif, png
 }

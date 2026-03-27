@@ -8,6 +8,13 @@ export interface CompressedFile {
   compressedSize: number;
   reductionPercent: number;
   error: string | null;
-  status: "pending" | "compressing" | "done" | "error";
-  previewUrl: string; // local object URL for original image
+  status: "pending" | "compressing" | "done" | "error" | "reoptimizing";
+  previewUrl: string;
+  /** Filename of the preserved original in uploads/tmp — enables Re-optimize */
+  uploadId?: string;
+  /** True when the output format was auto-changed (e.g. JPEG → WebP for alpha images) */
+  formatOverridden?: boolean;
+  /** Final quality/compressionLevel used during encoding */
+  quality?: number;
 }
+

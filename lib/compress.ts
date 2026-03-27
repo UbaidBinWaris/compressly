@@ -2,17 +2,20 @@ import sharp from "sharp";
 import path from "path";
 import fs from "fs/promises";
 import { v4 as uuidv4 } from "uuid";
-import { formatExt } from "./presets";
+import { formatExt, ALPHA_SAFE_FORMATS } from "./presets";
+import { sanitizeBasename } from "./utils";
+import { UPLOADS_TMP_DIR, GENERATED_DIR } from "./cleanup";
 import type { CompressionOptions } from "./settings";
 
-const GENERATED_DIR = path.join(process.cwd(), "public", "generated");
+// Allowed extensions for saved originals
+const SAFE_INPUT_EXTS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp"]);
 
 export const DEFAULT_OPTIONS: CompressionOptions = {
   targetSizeKB: 100,
   format: "webp",
   qualityStart: 85,
   qualityMin: 20,
-  qualityStep: 5, // kept for backwards-compat; binary search ignores it
+  qualityStep: 5,
   resize: null,
   stripMetadata: true,
 };
@@ -26,6 +29,12 @@ export interface CompressResult {
   originalName: string;
   outputName: string;
   outputFormat: string;
+  /** Filename of the preserved original — used for Re-optimize */
+  uploadId: string;
+  /** True when the requested format was changed (e.g. JPEG → WebP for alpha images) */
+  formatOverridden: boolean;
+  /** Final quality value used (compressionLevel for PNG, 1-100 for lossy) */
+  quality: number;
 }
 
 export async function compressImage(
@@ -36,14 +45,26 @@ export async function compressImage(
   const { targetSizeKB, format, qualityStart, qualityMin, resize, stripMetadata } =
     options;
 
-  const maxBytes = targetSizeKB * 1024;
-  const ext = formatExt(format);
-  const outputName = `${uuidv4()}.${ext}`;
-  const outputPath = path.join(GENERATED_DIR, outputName);
-
+  // ── 1. Save original to uploads/tmp ──────────────────────────────────────
+  await fs.mkdir(UPLOADS_TMP_DIR, { recursive: true });
   await fs.mkdir(GENERATED_DIR, { recursive: true });
 
-  // Build once-resized base buffer so every encode pass reuses the same pixels.
+  const rawExt = path.extname(originalName).toLowerCase();
+  const safeExt = SAFE_INPUT_EXTS.has(rawExt) ? rawExt : ".bin";
+  const uploadId = `${uuidv4()}_${Date.now()}${safeExt}`;
+  const uploadPath = path.join(UPLOADS_TMP_DIR, uploadId);
+  await fs.writeFile(uploadPath, buffer);
+
+  // ── 2. Alpha channel detection ────────────────────────────────────────────
+  const metadata = await sharp(buffer).metadata();
+  const hasAlpha = metadata.hasAlpha === true;
+
+  // If the requested format can't carry transparency, silently upgrade to WebP
+  const effectiveFormat =
+    hasAlpha && !ALPHA_SAFE_FORMATS.includes(format) ? "webp" : format;
+  const formatOverridden = effectiveFormat !== format;
+
+  // ── 3. Build resized base buffer ─────────────────────────────────────────
   let base = stripMetadata ? sharp(buffer) : sharp(buffer).withMetadata();
   if (resize && (resize.width || resize.height)) {
     base = base.resize({
@@ -56,56 +77,65 @@ export async function compressImage(
   const baseBuffer = await base.toBuffer();
 
   const originalSize = buffer.byteLength;
+  const maxBytes = targetSizeKB * 1024;
 
-  // ── Early exit ─────────────────────────────────────────────────────────────
-  // If encoding at maximum quality already satisfies the target, use it as-is —
-  // no need to search at all.
-  const earlyCandidate = await encodeBuffer(baseBuffer, format, qualityStart);
-  if (earlyCandidate.byteLength <= maxBytes) {
-    await fs.writeFile(outputPath, earlyCandidate);
-    return buildResult(outputPath, outputName, originalName, format, originalSize, earlyCandidate);
-  }
+  // ── 4. Output filename: basename_timestamp_qQuality.ext ─────────────────
+  const ext = formatExt(effectiveFormat);
+  const fileBase = sanitizeBasename(path.basename(originalName, path.extname(originalName)));
+  // Quality placeholder — will be filled after encoding
+  const ts = Date.now();
 
-  // ── Binary search ──────────────────────────────────────────────────────────
-  // Find the highest quality in [qualityMin, qualityStart] whose encoded size
-  // fits within maxBytes.  O(log n) encodes vs O(n) for linear step-down.
-  let lo = qualityMin;
-  let hi = qualityStart - 1; // qualityStart was already tried above
-  let bestBuffer: Buffer | null = null;
+  // ── 5. Encode ─────────────────────────────────────────────────────────────
+  let outputBuffer: Buffer;
+  let finalQuality: number;
 
-  while (lo <= hi) {
-    const mid = Math.floor((lo + hi) / 2);
-    const candidate = await encodeBuffer(baseBuffer, format, mid);
-
-    if (candidate.byteLength <= maxBytes) {
-      bestBuffer = candidate; // fits — try higher quality
-      lo = mid + 1;
+  if (effectiveFormat === "png") {
+    // PNG is lossless — binary search doesn't apply.
+    // compressionLevel 9 = smallest possible lossless file.
+    outputBuffer = await encodePng(baseBuffer);
+    finalQuality = 9; // compressionLevel
+  } else {
+    // Early exit: if max quality already fits, use it.
+    const earlyCandidate = await encodeBuffer(baseBuffer, effectiveFormat, qualityStart);
+    if (earlyCandidate.byteLength <= maxBytes) {
+      outputBuffer = earlyCandidate;
+      finalQuality = qualityStart;
     } else {
-      hi = mid - 1; // too large — try lower quality
+      // Binary search for highest quality that still fits.
+      let lo = qualityMin;
+      let hi = qualityStart - 1;
+      let bestBuffer: Buffer | null = null;
+      let bestQuality = qualityMin;
+
+      while (lo <= hi) {
+        const mid = Math.floor((lo + hi) / 2);
+        const candidate = await encodeBuffer(baseBuffer, effectiveFormat, mid);
+
+        if (candidate.byteLength <= maxBytes) {
+          bestBuffer = candidate;
+          bestQuality = mid;
+          lo = mid + 1; // fits — try higher quality
+        } else {
+          hi = mid - 1; // too large — try lower
+        }
+      }
+
+      // Fallback if nothing fit (very large or complex image)
+      if (bestBuffer) {
+        outputBuffer = bestBuffer;
+        finalQuality = bestQuality;
+      } else {
+        outputBuffer = await encodeBuffer(baseBuffer, effectiveFormat, qualityMin);
+        finalQuality = qualityMin;
+      }
     }
   }
 
-  // Safety fallback: nothing in the range fit — use the lowest allowed quality.
-  if (!bestBuffer) {
-    bestBuffer = await encodeBuffer(baseBuffer, format, qualityMin);
-  }
+  // ── 6. Write output with quality-stamped filename ─────────────────────────
+  const outputName = `${fileBase}_${ts}_q${finalQuality}.${ext}`;
+  const outputPath = path.join(GENERATED_DIR, outputName);
+  await fs.writeFile(outputPath, outputBuffer);
 
-  await fs.writeFile(outputPath, bestBuffer);
-  return buildResult(outputPath, outputName, originalName, format, originalSize, bestBuffer);
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function buildResult(
-  outputPath: string,
-  outputName: string,
-  originalName: string,
-  format: CompressionOptions["format"],
-  originalSize: number,
-  outputBuffer: Buffer
-): CompressResult {
   const compressedSize = outputBuffer.byteLength;
   return {
     outputPath,
@@ -118,13 +148,20 @@ function buildResult(
     ),
     originalName,
     outputName,
-    outputFormat: format,
+    outputFormat: effectiveFormat,
+    uploadId,
+    formatOverridden,
+    quality: finalQuality,
   };
 }
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
 async function encodeBuffer(
   buf: Buffer,
-  format: CompressionOptions["format"],
+  format: Exclude<CompressionOptions["format"], "png">,
   quality: number
 ): Promise<Buffer> {
   switch (format) {
@@ -132,14 +169,20 @@ async function encodeBuffer(
       return sharp(buf).avif({ quality }).toBuffer();
     case "jpeg":
       return sharp(buf).jpeg({ quality, mozjpeg: true }).toBuffer();
-    default:
+    default: // webp
       return sharp(buf).webp({ quality }).toBuffer();
   }
 }
 
+async function encodePng(buf: Buffer): Promise<Buffer> {
+  return sharp(buf)
+    .png({ compressionLevel: 9, adaptiveFiltering: true })
+    .toBuffer();
+}
+
 /**
  * Concurrency-limited parallel map.
- * Spawns at most `limit` concurrent workers over `items`.
+ * Spawns at most `limit` workers running `fn` over `items`.
  */
 export async function concurrentMap<T, R>(
   items: T[],

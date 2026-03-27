@@ -8,6 +8,7 @@ import { formatBytes } from "@/lib/utils";
 interface FileCardProps {
   file: CompressedFile;
   onRetry?: (id: string) => void;
+  onReoptimize?: (id: string) => void;
 }
 
 const FORMAT_COLORS: Record<string, string> = {
@@ -15,14 +16,17 @@ const FORMAT_COLORS: Record<string, string> = {
   avif: "bg-violet-500/20 text-violet-300 border-violet-500/30",
   jpeg: "bg-amber-500/20 text-amber-300 border-amber-500/30",
   jpg: "bg-amber-500/20 text-amber-300 border-amber-500/30",
+  png: "bg-sky-500/20 text-sky-300 border-sky-500/30",
 };
 
-export default function FileCard({ file, onRetry }: FileCardProps) {
+export default function FileCard({ file, onRetry, onReoptimize }: FileCardProps) {
   const [copied, setCopied] = useState(false);
 
   const isDone = file.status === "done";
   const isError = file.status === "error";
-  const isProcessing = file.status === "pending" || file.status === "compressing";
+  const isReoptimizing = file.status === "reoptimizing";
+  const isProcessing =
+    file.status === "pending" || file.status === "compressing" || isReoptimizing;
 
   const fmtKey = file.outputFormat?.toLowerCase();
   const fmtColor = FORMAT_COLORS[fmtKey] ?? FORMAT_COLORS["webp"];
@@ -57,12 +61,12 @@ export default function FileCard({ file, onRetry }: FileCardProps) {
           className="w-full h-full object-cover"
         />
 
-        {/* Processing overlay with shimmer below */}
+        {/* Processing overlay */}
         {isProcessing && (
           <div className="absolute inset-0 bg-slate-900/85 flex flex-col items-center justify-center gap-2">
             <div className="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
             <span className="text-xs text-slate-400 font-medium">
-              Compressing…
+              {isReoptimizing ? "Re-optimizing…" : "Compressing…"}
             </span>
           </div>
         )}
@@ -86,14 +90,24 @@ export default function FileCard({ file, onRetry }: FileCardProps) {
             <span className="text-xs text-red-300 text-center leading-snug line-clamp-3">
               {file.error}
             </span>
-            {onRetry && (
-              <button
-                onClick={() => onRetry(file.id)}
-                className="mt-1 px-3 py-1 text-xs font-semibold bg-red-500/20 hover:bg-red-500/30 border border-red-500/30 text-red-300 rounded-lg transition-colors"
-              >
-                Retry
-              </button>
-            )}
+            <div className="flex gap-2 mt-1">
+              {onRetry && (
+                <button
+                  onClick={() => onRetry(file.id)}
+                  className="px-3 py-1 text-xs font-semibold bg-red-500/20 hover:bg-red-500/30 border border-red-500/30 text-red-300 rounded-lg transition-colors"
+                >
+                  Retry
+                </button>
+              )}
+              {onReoptimize && file.uploadId && (
+                <button
+                  onClick={() => onReoptimize(file.id)}
+                  className="px-3 py-1 text-xs font-semibold bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-500/30 text-indigo-300 rounded-lg transition-colors"
+                >
+                  Re-optimize
+                </button>
+              )}
+            </div>
           </div>
         )}
 
@@ -111,6 +125,27 @@ export default function FileCard({ file, onRetry }: FileCardProps) {
           </div>
         )}
       </div>
+
+      {/* ── Format override warning ── */}
+      {isDone && file.formatOverridden && (
+        <div className="flex items-center gap-2 px-4 py-2 bg-amber-500/10 border-b border-amber-500/20 text-amber-300 text-[11px] font-medium">
+          <svg
+            className="w-3.5 h-3.5 shrink-0"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            strokeWidth={2}
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M12 9v3.75m9.303-9.126c.866 1.5-.217 3.374-1.948 3.374h-14.71c-1.73 0-2.813-1.874-1.948-3.374L10.051 2.628c.866-1.5 3.032-1.5 3.898 0l7.354 12.748zM12 15.75h.007v.008H12v-.008z"
+            />
+          </svg>
+          Transparency detected — saved as{" "}
+          <strong className="text-amber-200">{(file.outputFormat ?? "webp").toUpperCase()}</strong>
+        </div>
+      )}
 
       {/* ── Info ── */}
       <div className="flex flex-col gap-3 p-4">
@@ -158,7 +193,7 @@ export default function FileCard({ file, onRetry }: FileCardProps) {
               />
             </div>
 
-            {/* Download + Copy row */}
+            {/* Download + Re-optimize + Copy row */}
             <div className="flex gap-2">
               <a
                 href={file.outputUrl}
@@ -180,6 +215,30 @@ export default function FileCard({ file, onRetry }: FileCardProps) {
                 </svg>
                 Download
               </a>
+
+              {/* Re-optimize button — only when original is still available on server */}
+              {onReoptimize && file.uploadId && (
+                <button
+                  onClick={() => onReoptimize(file.id)}
+                  title="Re-compress with current settings (no re-upload needed)"
+                  className="flex items-center justify-center w-9 rounded-lg border border-slate-700 bg-slate-900/40 text-slate-400 hover:border-indigo-500/50 hover:text-indigo-400 transition-all shrink-0"
+                >
+                  {/* Refresh / re-optimize icon */}
+                  <svg
+                    className="w-4 h-4"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                    strokeWidth={1.8}
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99"
+                    />
+                  </svg>
+                </button>
+              )}
 
               {/* Copy URL button */}
               <button

@@ -110,6 +110,9 @@ export default function Home() {
             outputFormat: string;
             compressedSize: number;
             reductionPercent: number;
+            uploadId?: string;
+            formatOverridden?: boolean;
+            quality?: number;
           }>;
         };
 
@@ -127,6 +130,9 @@ export default function Home() {
               outputFormat: result.outputFormat,
               compressedSize: result.compressedSize,
               reductionPercent: result.reductionPercent,
+              uploadId: result.uploadId,
+              formatOverridden: result.formatOverridden,
+              quality: result.quality,
               error: null,
             };
           })
@@ -154,6 +160,77 @@ export default function Home() {
       )
     );
   }, []);
+
+  const handleReoptimize = useCallback(
+    async (id: string) => {
+      const file = files.find((f) => f.id === id);
+      if (!file || !file.uploadId) return;
+
+      setFiles((prev) =>
+        prev.map((f) => (f.id === id ? { ...f, status: "reoptimizing", error: null } : f))
+      );
+
+      const options = buildOptions();
+
+      try {
+        const res = await fetch("/api/reoptimize", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ uploadId: file.uploadId, options, originalName: file.originalName }),
+        });
+        const json = await res.json() as {
+          result?: {
+            outputName: string;
+            outputUrl: string;
+            outputFormat: string;
+            compressedSize: number;
+            reductionPercent: number;
+            uploadId?: string;
+            formatOverridden?: boolean;
+            quality?: number;
+          };
+          error?: string;
+        };
+        if (!res.ok || json.error) {
+          setFiles((prev) =>
+            prev.map((f) =>
+              f.id === id ? { ...f, status: "error", error: json.error ?? "Re-optimize failed" } : f
+            )
+          );
+        } else if (json.result) {
+          const r = json.result;
+          setFiles((prev) =>
+            prev.map((f) =>
+              f.id === id
+                ? {
+                    ...f,
+                    status: "done",
+                    outputName: r.outputName,
+                    outputUrl: r.outputUrl,
+                    outputFormat: r.outputFormat,
+                    compressedSize: r.compressedSize,
+                    reductionPercent: r.reductionPercent,
+                    uploadId: r.uploadId ?? f.uploadId,
+                    formatOverridden: r.formatOverridden,
+                    quality: r.quality,
+                    error: null,
+                  }
+                : f
+            )
+          );
+        }
+      } catch (err) {
+        setFiles((prev) =>
+          prev.map((f) =>
+            f.id === id
+              ? { ...f, status: "error", error: err instanceof Error ? err.message : "Network error" }
+              : f
+          )
+        );
+      }
+    },
+    [files, buildOptions]
+  );
 
   async function triggerZipDownload(
     done: CompressedFile[]
@@ -342,7 +419,7 @@ export default function Home() {
           >
             <AnimatePresence>
               {files.map((file) => (
-                <FileCard key={file.id} file={file} onRetry={handleRetry} />
+                <FileCard key={file.id} file={file} onRetry={handleRetry} onReoptimize={handleReoptimize} />
               ))}
             </AnimatePresence>
           </motion.div>

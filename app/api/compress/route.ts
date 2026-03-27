@@ -1,6 +1,7 @@
 import os from "os";
 import { NextRequest } from "next/server";
 import { compressImage, concurrentMap, DEFAULT_OPTIONS } from "@/lib/compress";
+import { maybeCleanup } from "@/lib/cleanup";
 import type { CompressionOptions } from "@/lib/settings";
 
 const ALLOWED_MIME_TYPES = new Set([
@@ -11,11 +12,12 @@ const ALLOWED_MIME_TYPES = new Set([
 ]);
 
 const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024; // 20 MB per file
-
-// Scale concurrency to available CPU cores, capped at 10.
 const CONCURRENCY_LIMIT = Math.min(10, Math.max(1, os.cpus().length));
 
 export async function POST(request: NextRequest) {
+  // Lazy cleanup: runs at most once per 10 minutes across all requests
+  await maybeCleanup();
+
   let formData: FormData;
   try {
     formData = await request.formData();
@@ -28,7 +30,7 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: "No files uploaded" }, { status: 400 });
   }
 
-  // Parse compression options sent from the client (JSON string in formData)
+  // Parse compression options (JSON string appended by the client)
   let options: CompressionOptions = DEFAULT_OPTIONS;
   const optionsRaw = formData.get("options");
   if (typeof optionsRaw === "string") {
@@ -44,7 +46,7 @@ export async function POST(request: NextRequest) {
         stripMetadata: parsed.stripMetadata ?? DEFAULT_OPTIONS.stripMetadata,
       };
     } catch {
-      // Fall through to defaults
+      // Use defaults
     }
   }
 
