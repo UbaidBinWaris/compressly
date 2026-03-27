@@ -8,7 +8,7 @@ export interface CompressedFile {
   compressedSize: number;
   reductionPercent: number;
   error: string | null;
-  status: "pending" | "compressing" | "done" | "error" | "reoptimizing";
+  status: "pending" | "compressing" | "queued" | "done" | "error" | "reoptimizing";
   previewUrl: string;
   /** Filename of the preserved original in uploads/tmp — enables Re-optimize */
   uploadId?: string;
@@ -16,5 +16,8 @@ export interface CompressedFile {
   formatOverridden?: boolean;
   /** Final quality/compressionLevel used during encoding */
   quality?: number;
+  /** BullMQ job ID — set when processing is async (Redis mode) */
+  jobId?: string;
 }
+
 

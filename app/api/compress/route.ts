@@ -1,23 +1,73 @@
 import os from "os";
+import path from "path";
 import { NextRequest } from "next/server";
 import { compressImage, concurrentMap, DEFAULT_OPTIONS } from "@/lib/compress";
-import { maybeCleanup } from "@/lib/cleanup";
+import { maybeCleanup, UPLOADS_TMP_DIR } from "@/lib/cleanup";
+import { generateHash, getCachedResult, setCachedResult } from "@/lib/hash";
+import { detectMimeType, ALLOWED_MIMES } from "@/lib/magicBytes";
+import { checkRateLimit } from "@/lib/rateLimit";
+import {
+  getQueue,
+  isRedisAvailable,
+  resetRedisCache,
+  type JobPayload,
+} from "@/lib/queue";
 import type { CompressionOptions } from "@/lib/settings";
-
-const ALLOWED_MIME_TYPES = new Set([
-  "image/jpeg",
-  "image/png",
-  "image/webp",
-  "image/gif",
-]);
+import fs from "fs/promises";
 
 const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024; // 20 MB per file
 const CONCURRENCY_LIMIT = Math.min(10, Math.max(1, os.cpus().length));
 
+// ── Shared result shape ───────────────────────────────────────────────────────
+
+interface FileResult {
+  /** Set when the job was queued (async mode) */
+  jobId?: string;
+  /** Set when the result is immediately available (sync or cache hit) */
+  outputUrl?: string;
+  outputName?: string;
+  originalSize?: number;
+  compressedSize?: number;
+  reductionPercent?: number;
+  outputFormat?: string;
+  uploadId?: string;
+  formatOverridden?: boolean;
+  quality?: number;
+  /** True when this result came from the hash cache */
+  cached?: boolean;
+  originalName: string;
+  error: string | null;
+}
+
+// ── POST /api/compress ────────────────────────────────────────────────────────
+
 export async function POST(request: NextRequest) {
-  // Lazy cleanup: runs at most once per 10 minutes across all requests
+  // ── Rate limiting ──────────────────────────────────────────────────────────
+  const ip =
+    request.headers.get("x-forwarded-for")?.split(",")[0].trim() ??
+    request.headers.get("x-real-ip") ??
+    "unknown";
+
+  const rateLimit = checkRateLimit(ip);
+  if (!rateLimit.allowed) {
+    return Response.json(
+      { error: "Too many requests. Max 30 compress requests per minute." },
+      {
+        status: 429,
+        headers: {
+          "X-RateLimit-Limit": "30",
+          "X-RateLimit-Remaining": "0",
+          "X-RateLimit-Reset": String(Math.ceil(rateLimit.resetAt / 1000)),
+          "Retry-After": String(Math.ceil((rateLimit.resetAt - Date.now()) / 1000)),
+        },
+      }
+    );
+  }
+
+  // ── Cleanup ────────────────────────────────────────────────────────────────
   await maybeCleanup();
 
+  // ── Parse form data ────────────────────────────────────────────────────────
   let formData: FormData;
   try {
     formData = await request.formData();
@@ -30,7 +80,7 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: "No files uploaded" }, { status: 400 });
   }
 
-  // Parse compression options (JSON string appended by the client)
+  // ── Parse options ──────────────────────────────────────────────────────────
   let options: CompressionOptions = DEFAULT_OPTIONS;
   const optionsRaw = formData.get("options");
   if (typeof optionsRaw === "string") {
@@ -50,24 +100,138 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  const results = await concurrentMap(files, CONCURRENCY_LIMIT, async (file) => {
-    if (!ALLOWED_MIME_TYPES.has(file.type)) {
-      return { error: `Unsupported file type: ${file.type}`, originalName: file.name };
-    }
+  // ?sync=true or ?sync forces synchronous mode regardless of Redis availability
+  const syncMode = request.nextUrl.searchParams.get("sync") !== null;
+
+  // ── Check Redis ────────────────────────────────────────────────────────────
+  const useQueue = !syncMode && (await isRedisAvailable().catch(() => false));
+
+  // ── Process each file ──────────────────────────────────────────────────────
+  const results = await concurrentMap(files, CONCURRENCY_LIMIT, async (file): Promise<FileResult> => {
+    // Size check
     if (file.size > MAX_FILE_SIZE_BYTES) {
-      return { error: `File too large (max 20 MB): ${file.name}`, originalName: file.name };
+      return {
+        originalName: file.name,
+        error: `File too large (max 20 MB): ${file.name}`,
+      };
     }
+
+    let buffer: Buffer;
     try {
-      const buffer = Buffer.from(await file.arrayBuffer());
+      buffer = Buffer.from(await file.arrayBuffer());
+    } catch {
+      return { originalName: file.name, error: "Failed to read file" };
+    }
+
+    // ── Magic bytes validation ──────────────────────────────────────────────
+    const mime = detectMimeType(buffer);
+    if (!mime || !ALLOWED_MIMES.has(mime)) {
+      return {
+        originalName: file.name,
+        error: `Unsupported file type for "${file.name}". Accepted: JPEG, PNG, WebP, GIF, AVIF.`,
+      };
+    }
+
+    // ── Hash & cache check ──────────────────────────────────────────────────
+    const hash = generateHash(buffer, options);
+    const cached = await getCachedResult(hash);
+    if (cached) {
+      // Instant cache hit — no compression needed
+      const stat = await fs.stat(cached.filePath).catch(() => null);
+      return {
+        originalName: file.name,
+        error: null,
+        outputUrl: cached.url,
+        outputName: path.basename(cached.filePath),
+        originalSize: file.size,
+        compressedSize: stat?.size ?? 0,
+        reductionPercent: stat
+          ? Math.max(0, Math.round(((file.size - stat.size) / file.size) * 100))
+          : 0,
+        outputFormat: cached.ext,
+        cached: true,
+      };
+    }
+
+    // ── Save original for worker / re-optimize ──────────────────────────────
+    // (compressImage already saves to UPLOADS_TMP_DIR — only needed for queue mode)
+    if (useQueue) {
+      try {
+        await fs.mkdir(UPLOADS_TMP_DIR, { recursive: true });
+        // We'll let compressImage handle saving when in sync mode;
+        // for queue mode we save manually so the worker can read it
+        const { v4: uuidv4 } = await import("uuid");
+        const rawExt = path.extname(file.name).toLowerCase();
+        const safeExt = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif"].includes(rawExt)
+          ? rawExt
+          : ".bin";
+        const uploadId = `${uuidv4()}_${Date.now()}${safeExt}`;
+        const uploadPath = path.join(UPLOADS_TMP_DIR, uploadId);
+        await fs.writeFile(uploadPath, buffer);
+
+        const payload: JobPayload = {
+          uploadId,
+          originalName: file.name,
+          options,
+          hash,
+        };
+
+        const queue = getQueue();
+        const job = await queue.add("compress", payload).catch((err) => {
+          // Redis failed mid-request — reset and fall through to sync
+          resetRedisCache();
+          throw err;
+        });
+
+        return {
+          originalName: file.name,
+          error: null,
+          jobId: job.id,
+        };
+      } catch (err) {
+        // Queue failed — fall through to sync processing
+        console.warn("[api/compress] Queue enqueue failed, falling back to sync:", err);
+      }
+    }
+
+    // ── Synchronous fallback ────────────────────────────────────────────────
+    try {
       const result = await compressImage(buffer, file.name, options);
-      return { ...result, error: null };
+
+      // Write result to cache
+      const ext = path.extname(result.outputName).slice(1);
+      const cacheEntry = await setCachedResult(hash, result.outputPath, ext).catch(() => null);
+
+      return {
+        originalName: file.name,
+        error: null,
+        outputUrl: cacheEntry?.url ?? result.outputUrl,
+        outputName: result.outputName,
+        originalSize: result.originalSize,
+        compressedSize: result.compressedSize,
+        reductionPercent: result.reductionPercent,
+        outputFormat: result.outputFormat,
+        uploadId: result.uploadId,
+        formatOverridden: result.formatOverridden,
+        quality: result.quality,
+        cached: false,
+      };
     } catch (err) {
       return {
-        error: err instanceof Error ? err.message : "Compression failed",
         originalName: file.name,
+        error: err instanceof Error ? err.message : "Compression failed",
       };
     }
   });
 
-  return Response.json({ results });
+  return Response.json(
+    { results },
+    {
+      headers: {
+        "X-RateLimit-Limit": "30",
+        "X-RateLimit-Remaining": String(rateLimit.remaining),
+        "X-RateLimit-Reset": String(Math.ceil(rateLimit.resetAt / 1000)),
+      },
+    }
+  );
 }
