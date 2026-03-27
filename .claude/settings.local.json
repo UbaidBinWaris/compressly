@@ -2,7 +2,13 @@
   "permissions": {
     "allow": [
       "Bash(npx create-next-app@latest . --typescript --tailwind --eslint --app --no-src-dir --import-alias \"@/*\" --yes)",
-      "Bash(npm install:*)"
+      "Bash(npm install:*)",
+      "Bash(grep -r \"formData\\\\|multipart\\\\|file upload\\\\|FormData\" /c/Users/PMLS/Documents/GitHub/compressly/node_modules/next/dist/docs/ --include=*.md -l)",
+      "Bash(npx tsc:*)",
+      "Bash(npm run:*)",
+      "Bash(node -e \"const s = require\\(''/c/Users/PMLS/Documents/GitHub/compressly/node_modules/sharp/package.json''\\); console.log\\(s.version\\)\")",
+      "Bash(node -e \"console.log\\(require\\(''./node_modules/sharp/package.json''\\).version\\)\")",
+      "Bash(grep -r \"requestBodySizeLimit\\\\|bodySizeLimit\" /c/Users/PMLS/Documents/GitHub/compressly/node_modules/next/dist/docs/ --include=*.md -l)"
     ]
   }
 }

@@ -40,5 +40,10 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
+# user-uploaded & generated files (keep dirs, ignore contents)
+/public/uploads/*
+!/public/uploads/.gitkeep
+/public/generated/*
+!/public/generated/.gitkeep
 
 /.claudde
