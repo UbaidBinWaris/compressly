@@ -3,10 +3,11 @@ export interface CompressedFile {
   originalName: string;
   outputName: string;
   outputUrl: string;
+  outputFormat: string;
   originalSize: number;
   compressedSize: number;
   reductionPercent: number;
   error: string | null;
   status: "pending" | "compressing" | "done" | "error";
-  previewUrl: string; // local object URL for original preview
+  previewUrl: string; // local object URL for original image
 }

@@ -13,6 +13,7 @@ export interface CompressionSettings {
     maintainAspect: boolean;
   };
   stripMetadata: boolean;
+  autoDownload: boolean;
 }
 
 /** The options actually sent to the server — derived from CompressionSettings + Preset */
@@ -43,6 +44,7 @@ export const DEFAULT_SETTINGS: CompressionSettings = {
     maintainAspect: true,
   },
   stripMetadata: true,
+  autoDownload: false,
 };
 
 const STORAGE_KEY = "compressly_settings_v1";

@@ -21,7 +21,7 @@ export async function POST(request: NextRequest) {
 
   // Sanitize: only allow bare filenames — no path traversal
   const sanitized = filenames.filter(
-    (f) => typeof f === "string" && /^[\w\-]+\.webp$/.test(f)
+    (f) => typeof f === "string" && /^[\w-]+\.(webp|avif|jpg)$/.test(f)
   );
 
   if (sanitized.length === 0) {
