@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { v4 as uuidv4 } from "uuid";
+import Link from "next/link";
 import DropZone from "./components/DropZone";
 import FileCard from "./components/FileCard";
 import StatsBar from "./components/StatsBar";
@@ -12,6 +13,37 @@ import { PRESETS } from "@/lib/presets";
 import type { CompressedFile } from "@/lib/types";
 import type { CompressionOptions } from "@/lib/settings";
 
+// ── Types for API response shapes ─────────────────────────────────────────────
+
+interface FileResult {
+  jobId?: string;
+  outputUrl?: string;
+  outputName?: string;
+  originalSize?: number;
+  compressedSize?: number;
+  reductionPercent?: number;
+  outputFormat?: string;
+  uploadId?: string;
+  formatOverridden?: boolean;
+  quality?: number;
+  cached?: boolean;
+  originalName: string;
+  error: string | null;
+}
+
+interface JobResultResponse {
+  outputUrl: string;
+  outputName: string;
+  originalSize: number;
+  compressedSize: number;
+  reductionPercent: number;
+  outputFormat: string;
+  uploadId?: string;
+  formatOverridden?: boolean;
+  quality?: number;
+  cached?: boolean;
+}
+
 export default function Home() {
   const [files, setFiles] = useState<CompressedFile[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -19,6 +51,9 @@ export default function Home() {
   const [showRestoredToast, setShowRestoredToast] = useState(false);
 
   const { settings, setSettings, applyPreset, hydrated, wasRestored } = useSettings();
+
+  // Track active polling intervals: fileId → intervalId
+  const pollingRefs = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
 
   // Show "restored" toast once after hydration, then auto-dismiss
   useEffect(() => {
@@ -40,6 +75,13 @@ export default function Home() {
       if (done.length > 0) triggerZipDownload(done);
     }
   }, [isProcessing, files, settings.autoDownload]);
+
+  // Cleanup polling on unmount
+  useEffect(() => {
+    return () => {
+      pollingRefs.current.forEach((id) => clearInterval(id));
+    };
+  }, []);
 
   /** Derive the CompressionOptions from current settings */
   const buildOptions = useCallback((): CompressionOptions => {
@@ -68,6 +110,96 @@ export default function Home() {
       stripMetadata: settings.stripMetadata,
     };
   }, [settings]);
+
+  // ── Polling ──────────────────────────────────────────────────────────────────
+
+  const startPolling = useCallback((fileId: string, jobId: string, originalSize: number) => {
+    // Stop any existing poll for this file
+    const existing = pollingRefs.current.get(fileId);
+    if (existing) clearInterval(existing);
+
+    const POLL_INTERVAL = 1500;
+    const MAX_POLLS = 120; // 3 minutes max
+    let polls = 0;
+
+    const interval = setInterval(async () => {
+      polls++;
+      if (polls > MAX_POLLS) {
+        clearInterval(interval);
+        pollingRefs.current.delete(fileId);
+        setFiles((prev) =>
+          prev.map((f) =>
+            f.id === fileId
+              ? { ...f, status: "error", error: "Job timed out — please re-upload." }
+              : f
+          )
+        );
+        return;
+      }
+
+      try {
+        const statusRes = await fetch(`/api/status/${jobId}`);
+        if (!statusRes.ok) return; // transient error — keep polling
+
+        const { status } = await statusRes.json() as { status: string };
+
+        if (status === "processing") {
+          setFiles((prev) =>
+            prev.map((f) => (f.id === fileId ? { ...f, status: "compressing" } : f))
+          );
+        }
+
+        if (status === "completed") {
+          clearInterval(interval);
+          pollingRefs.current.delete(fileId);
+
+          const resultRes = await fetch(`/api/result/${jobId}`);
+          if (!resultRes.ok) throw new Error("Failed to fetch result");
+          const r = await resultRes.json() as JobResultResponse;
+
+          setFiles((prev) =>
+            prev.map((f) =>
+              f.id === fileId
+                ? {
+                    ...f,
+                    status: "done",
+                    outputUrl: r.outputUrl,
+                    outputName: r.outputName,
+                    originalSize: r.originalSize || originalSize,
+                    compressedSize: r.compressedSize,
+                    reductionPercent: r.reductionPercent,
+                    outputFormat: r.outputFormat,
+                    uploadId: r.uploadId,
+                    formatOverridden: r.formatOverridden,
+                    quality: r.quality,
+                    error: null,
+                  }
+                : f
+            )
+          );
+        }
+
+        if (status === "failed") {
+          clearInterval(interval);
+          pollingRefs.current.delete(fileId);
+          setFiles((prev) =>
+            prev.map((f) =>
+              f.id === fileId
+                ? { ...f, status: "error", error: "Compression job failed. Please retry." }
+                : f
+            )
+          );
+        }
+      } catch (err) {
+        console.warn("[poll] Error polling status:", err);
+        // non-fatal — keep polling
+      }
+    }, POLL_INTERVAL);
+
+    pollingRefs.current.set(fileId, interval);
+  }, []);
+
+  // ── Upload handler ────────────────────────────────────────────────────────────
 
   const handleFiles = useCallback(
     async (newFiles: File[]) => {
@@ -102,34 +234,33 @@ export default function Home() {
           throw new Error((json as { error?: string }).error ?? "Server error");
         }
 
-        const { results } = (await res.json()) as {
-          results: Array<{
-            error: string | null;
-            outputName: string;
-            outputUrl: string;
-            outputFormat: string;
-            compressedSize: number;
-            reductionPercent: number;
-            uploadId?: string;
-            formatOverridden?: boolean;
-            quality?: number;
-          }>;
-        };
+        const { results } = (await res.json()) as { results: FileResult[] };
 
         setFiles((prev) =>
           prev.map((f) => {
             const idx = entries.findIndex((e) => e.id === f.id);
             if (idx === -1 || results[idx] === undefined) return f;
             const result = results[idx];
+
             if (result.error) return { ...f, status: "error", error: result.error };
+
+            // ── Queue mode: jobId returned ──────────────────────────────────
+            if (result.jobId) {
+              // Kick off polling
+              setTimeout(() => startPolling(f.id, result.jobId!, f.originalSize), 0);
+              return { ...f, status: "queued", jobId: result.jobId };
+            }
+
+            // ── Sync / cache-hit mode: result returned immediately ──────────
             return {
               ...f,
               status: "done",
-              outputName: result.outputName,
-              outputUrl: result.outputUrl,
-              outputFormat: result.outputFormat,
-              compressedSize: result.compressedSize,
-              reductionPercent: result.reductionPercent,
+              outputUrl: result.outputUrl!,
+              outputName: result.outputName!,
+              outputFormat: result.outputFormat!,
+              originalSize: result.originalSize ?? f.originalSize,
+              compressedSize: result.compressedSize!,
+              reductionPercent: result.reductionPercent!,
               uploadId: result.uploadId,
               formatOverridden: result.formatOverridden,
               quality: result.quality,
@@ -150,8 +281,10 @@ export default function Home() {
         setIsProcessing(false);
       }
     },
-    [buildOptions, settings.format]
+    [buildOptions, settings.format, startPolling]
   );
+
+  // ── Other handlers ────────────────────────────────────────────────────────────
 
   const handleRetry = useCallback((id: string) => {
     setFiles((prev) =>
@@ -232,9 +365,7 @@ export default function Home() {
     [files, buildOptions]
   );
 
-  async function triggerZipDownload(
-    done: CompressedFile[]
-  ) {
+  async function triggerZipDownload(done: CompressedFile[]) {
     if (done.length === 0 || isZipping) return;
     setIsZipping(true);
     try {
@@ -263,6 +394,9 @@ export default function Home() {
   };
 
   const handleClear = () => {
+    // Stop all polling
+    pollingRefs.current.forEach((id) => clearInterval(id));
+    pollingRefs.current.clear();
     files.forEach((f) => URL.revokeObjectURL(f.previewUrl));
     setFiles([]);
   };
@@ -293,13 +427,19 @@ export default function Home() {
                 />
               </svg>
             </div>
-            <span className="text-lg font-semibold tracking-tight">
-              Compressly
+            <span className="text-lg font-semibold tracking-tight">Compressly</span>
+          </div>
+          <div className="flex items-center gap-3">
+            <Link
+              href="/docs"
+              className="text-xs text-slate-400 hover:text-slate-200 font-medium transition-colors"
+            >
+              API Docs
+            </Link>
+            <span className="text-xs text-slate-500 font-medium bg-slate-800 px-3 py-1 rounded-full">
+              Free · No limits · No login
             </span>
           </div>
-          <span className="text-xs text-slate-500 font-medium bg-slate-800 px-3 py-1 rounded-full">
-            Free · No limits · No login
-          </span>
         </div>
       </header>
 
@@ -334,7 +474,6 @@ export default function Home() {
       <div className="max-w-6xl mx-auto px-6 py-12 flex flex-col gap-8">
         {/* ── Hero ── */}
         <div className="text-center flex flex-col items-center gap-4">
-          {/* Branding pill */}
           <div className="flex items-center gap-2 bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-xs font-semibold px-4 py-1.5 rounded-full">
             <span>🔥</span>
             <span>Smart Size Compression Engine</span>
@@ -419,7 +558,12 @@ export default function Home() {
           >
             <AnimatePresence>
               {files.map((file) => (
-                <FileCard key={file.id} file={file} onRetry={handleRetry} onReoptimize={handleReoptimize} />
+                <FileCard
+                  key={file.id}
+                  file={file}
+                  onRetry={handleRetry}
+                  onReoptimize={handleReoptimize}
+                />
               ))}
             </AnimatePresence>
           </motion.div>
@@ -429,8 +573,8 @@ export default function Home() {
         {files.length === 0 && (
           <div className="flex justify-center">
             <div className="flex flex-wrap justify-center gap-6 text-slate-600 text-sm">
-              <Feature icon="🖼️" label="JPG, PNG, WebP, GIF" />
-              <Feature icon="⚡" label="Binary-search quality" />
+              <Feature icon="🖼️" label="JPG, PNG, WebP, AVIF" />
+              <Feature icon="⚡" label="Queue + hash cache" />
               <Feature icon="📦" label="Bulk + ZIP download" />
               <Feature icon="🔒" label="Your files stay local" />
             </div>

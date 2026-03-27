@@ -25,8 +25,9 @@ export default function FileCard({ file, onRetry, onReoptimize }: FileCardProps)
   const isDone = file.status === "done";
   const isError = file.status === "error";
   const isReoptimizing = file.status === "reoptimizing";
+  const isQueued = file.status === "queued";
   const isProcessing =
-    file.status === "pending" || file.status === "compressing" || isReoptimizing;
+    file.status === "pending" || file.status === "compressing" || isReoptimizing || isQueued;
 
   const fmtKey = file.outputFormat?.toLowerCase();
   const fmtColor = FORMAT_COLORS[fmtKey] ?? FORMAT_COLORS["webp"];

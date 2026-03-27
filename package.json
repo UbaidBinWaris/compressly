@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "worker": "tsx workers/compressionWorker.ts"
   },
   "dependencies": {
     "archiver": "^7.0.1",
