@@ -7,8 +7,25 @@ import { sanitizeBasename } from "./utils";
 import { UPLOADS_TMP_DIR, GENERATED_DIR } from "./cleanup";
 import type { CompressionOptions } from "./settings";
 
+// Security: block decompression bombs (max 4096×4096 = 16.7 MP)
+// Applied per-instance via options (avoids Turbopack ESM interop issues with static methods)
+const PIXEL_LIMIT = 4096 * 4096;
+
 // Allowed extensions for saved originals
-const SAFE_INPUT_EXTS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp"]);
+const SAFE_INPUT_EXTS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif"]);
+
+/**
+ * Resolves or rejects after `ms` milliseconds.
+ * Wrap any async operation to enforce a hard timeout.
+ */
+export function withTimeout<T>(promise: Promise<T>, ms: number, label = "operation"): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`Timeout: ${label} exceeded ${ms}ms`)), ms)
+    ),
+  ]);
+}
 
 export const DEFAULT_OPTIONS: CompressionOptions = {
   targetSizeKB: 100,
@@ -56,7 +73,8 @@ export async function compressImage(
   await fs.writeFile(uploadPath, buffer);
 
   // ── 2. Alpha channel detection ────────────────────────────────────────────
-  const metadata = await sharp(buffer).metadata();
+  // limitInputPixels is set globally above; sharp enforces it on every decode
+  const metadata = await withTimeout(sharp(buffer, { limitInputPixels: PIXEL_LIMIT }).metadata(), 8000, "metadata");
   const hasAlpha = metadata.hasAlpha === true;
 
   // If the requested format can't carry transparency, silently upgrade to WebP
@@ -65,7 +83,9 @@ export async function compressImage(
   const formatOverridden = effectiveFormat !== format;
 
   // ── 3. Build resized base buffer ─────────────────────────────────────────
-  let base = stripMetadata ? sharp(buffer) : sharp(buffer).withMetadata();
+  let base = stripMetadata
+    ? sharp(buffer, { limitInputPixels: PIXEL_LIMIT })
+    : sharp(buffer, { limitInputPixels: PIXEL_LIMIT }).withMetadata();
   if (resize && (resize.width || resize.height)) {
     base = base.resize({
       width: resize.width ?? undefined,
@@ -164,18 +184,19 @@ async function encodeBuffer(
   format: Exclude<CompressionOptions["format"], "png">,
   quality: number
 ): Promise<Buffer> {
+  const opts = { limitInputPixels: PIXEL_LIMIT };
   switch (format) {
     case "avif":
-      return sharp(buf).avif({ quality }).toBuffer();
+      return sharp(buf, opts).avif({ quality }).toBuffer();
     case "jpeg":
-      return sharp(buf).jpeg({ quality, mozjpeg: true }).toBuffer();
+      return sharp(buf, opts).jpeg({ quality, mozjpeg: true }).toBuffer();
     default: // webp
-      return sharp(buf).webp({ quality }).toBuffer();
+      return sharp(buf, opts).webp({ quality }).toBuffer();
   }
 }
 
 async function encodePng(buf: Buffer): Promise<Buffer> {
-  return sharp(buf)
+  return sharp(buf, { limitInputPixels: PIXEL_LIMIT })
     .png({ compressionLevel: 9, adaptiveFiltering: true })
     .toBuffer();
 }

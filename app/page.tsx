@@ -9,6 +9,7 @@ import FileCard from "./components/FileCard";
 import StatsBar from "./components/StatsBar";
 import SettingsPanel from "./components/SettingsPanel";
 import { useSettings } from "./hooks/useSettings";
+import { usePasteUpload } from "./hooks/usePasteUpload";
 import { PRESETS } from "@/lib/presets";
 import type { CompressedFile } from "@/lib/types";
 import type { CompressionOptions } from "@/lib/settings";
@@ -55,6 +56,13 @@ export default function Home() {
   // Track active polling intervals: fileId → intervalId
   const pollingRefs = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
 
+  // ── Paste-to-upload ─────────────────────────────────────────────────────────
+  // Note: handleFiles is defined later via useCallback — we use a stable ref
+  const handleFilesRef = useRef<(files: File[]) => void>(() => {});
+  const { pasteToast } = usePasteUpload({
+    onFiles: useCallback((files: File[]) => handleFilesRef.current(files), []),
+    enabled: hydrated,
+  });
   // Show "restored" toast once after hydration, then auto-dismiss
   useEffect(() => {
     if (hydrated && wasRestored) {
@@ -284,6 +292,9 @@ export default function Home() {
     [buildOptions, settings.format, startPolling]
   );
 
+  // Keep the paste hook's stable ref in sync with the latest handleFiles closure
+  useEffect(() => { handleFilesRef.current = handleFiles; }, [handleFiles]);
+
   // ── Other handlers ────────────────────────────────────────────────────────────
 
   const handleRetry = useCallback((id: string) => {
@@ -467,6 +478,24 @@ export default function Home() {
               />
             </svg>
             Restored your last settings
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ── Paste-to-upload toast ── */}
+      <AnimatePresence>
+        {pasteToast.visible && (
+          <motion.div
+            initial={{ opacity: 0, y: -12, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -12, scale: 0.95 }}
+            transition={{ duration: 0.18, type: "spring", stiffness: 300 }}
+            className="fixed top-4 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 bg-indigo-600 border border-indigo-500 text-white text-xs font-semibold px-4 py-2.5 rounded-full shadow-xl shadow-indigo-950/60"
+          >
+            <span className="text-sm">⚡</span>
+            {pasteToast.count === 1
+              ? "Pasted image detected — optimizing…"
+              : `${pasteToast.count} pasted images detected — optimizing…`}
           </motion.div>
         )}
       </AnimatePresence>
