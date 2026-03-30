@@ -202,7 +202,16 @@ export async function POST(request: NextRequest) {
         const uploadPath = path.join(UPLOADS_TMP_DIR, uploadId);
         await fs.writeFile(uploadPath, buffer);
 
+        // Verify file is on disk before handing the path to the worker.
+        // fs.writeFile resolves only after the OS write, but an explicit
+        // stat call also ensures the directory entry is visible to other
+        // processes (relevant on network/virtual file systems).
+        await fs.access(uploadPath).catch(() => {
+          throw new Error(`File not saved properly before queuing: ${uploadPath}`);
+        });
+
         const payload: JobPayload = {
+          filePath: uploadPath, // absolute path — worker must use this
           uploadId,
           originalName: file.name,
           options,

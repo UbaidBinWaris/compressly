@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { Job } from "bullmq";
-import { getQueue, isRedisAvailable, type JobResult } from "@/lib/queue";
+import { getQueue, isRedisAvailable, type JobPayload, type JobResult } from "@/lib/queue";
 
 type BullMQState = "waiting" | "active" | "completed" | "failed" | "delayed" | "unknown";
 type PublicStatus = "pending" | "processing" | "completed" | "failed";
@@ -50,21 +50,17 @@ export async function GET(
     const state = (await job.getState()) as BullMQState;
     const status = mapState(state);
 
+    // progress is a number 0-100 set by job.updateProgress() in the worker
+    const progress = typeof job.progress === "number" ? job.progress : 0;
+
     return Response.json({
       jobId,
       status,
+      progress,
       ...(status === "failed" && { reason: job.failedReason }),
     });
   } catch (err) {
     console.error("[api/status] Error:", err);
     return Response.json({ error: "Failed to fetch job status" }, { status: 500 });
   }
-}
-
-// Needed for TS — JobPayload is already typed in queue.ts but Job needs it here too
-interface JobPayload {
-  uploadId: string;
-  originalName: string;
-  options: unknown;
-  hash: string;
 }

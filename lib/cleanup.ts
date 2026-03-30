@@ -16,21 +16,33 @@ const CLEANUP_INTERVAL_MS = 10 * 60 * 1000; // run at most once every 10 minutes
 let lastCleanupMs = 0;
 
 /**
- * Call at the start of every compress / reoptimize request.
- * Runs a full cleanup pass at most once every CLEANUP_INTERVAL_MS.
- * Cache directory is intentionally excluded — it is persistent.
+ * Ensure all working directories exist.
+ * Called unconditionally — cheap because mkdir with recursive:true is a no-op
+ * when the directory already exists.
  */
-export async function maybeCleanup(): Promise<void> {
-  const now = Date.now();
-  if (now - lastCleanupMs < CLEANUP_INTERVAL_MS) return;
-  lastCleanupMs = now;
-
-  // Ensure all directories exist
+export async function ensureDirectories(): Promise<void> {
   await Promise.allSettled([
     fs.mkdir(UPLOADS_TMP_DIR, { recursive: true }),
     fs.mkdir(GENERATED_DIR, { recursive: true }),
     fs.mkdir(CACHE_DIR, { recursive: true }),
   ]);
+}
+
+/**
+ * Call at the start of every compress / reoptimize request.
+ * Always ensures directories exist, then runs a full cleanup pass at most
+ * once every CLEANUP_INTERVAL_MS.
+ * Cache directory is intentionally excluded — it is persistent.
+ */
+export async function maybeCleanup(): Promise<void> {
+  // Always create directories — this is fast and must not be throttled,
+  // because the worker is a separate process and may start before the
+  // API route has had a chance to create them.
+  await ensureDirectories();
+
+  const now = Date.now();
+  if (now - lastCleanupMs < CLEANUP_INTERVAL_MS) return;
+  lastCleanupMs = now;
 
   // Only clean tmp dirs — cache is persistent
   await Promise.allSettled([

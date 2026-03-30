@@ -5,6 +5,9 @@ import type { CompressionOptions } from "./settings";
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface JobPayload {
+  /** Absolute path to the saved upload file — primary source of truth. */
+  filePath: string;
+  /** Filename within UPLOADS_TMP_DIR — kept for backward compatibility. */
   uploadId: string;
   originalName: string;
   options: CompressionOptions;
