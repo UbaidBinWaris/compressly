@@ -27,12 +27,14 @@ import { maybeCleanup, UPLOADS_TMP_DIR } from "../lib/cleanup";
 
 // ── Sharp tuning ─────────────────────────────────────────────────────────────
 
-sharp.concurrency(0); // use all available cores within each job
-sharp.cache(false);   // disable sharp's internal tile cache
+// One Sharp thread per job — BullMQ handles job-level parallelism.
+// Setting 0 (all cores) per job causes N×cpuCount threads when N jobs run concurrently.
+sharp.concurrency(1);
+sharp.cache(false);
 
 // ── Concurrency ───────────────────────────────────────────────────────────────
 
-const CONCURRENCY = Math.min(os.cpus().length, 10);
+const CONCURRENCY = Math.min(4, os.cpus().length);
 
 // ── Job config ────────────────────────────────────────────────────────────────
 
@@ -59,13 +61,13 @@ async function readUploadWithRetry(filePath: string): Promise<Buffer> {
 
   for (let attempt = 1; attempt <= FILE_READ_RETRIES; attempt++) {
     try {
-      console.log(`[worker] Reading file (attempt ${attempt}/${FILE_READ_RETRIES}): ${filePath}`);
+      if (attempt > 1) console.log(`Reading file (attempt ${attempt}/${FILE_READ_RETRIES}): ${filePath}`);
       return await fsp.readFile(filePath);
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
       const isNotFound = (err as NodeJS.ErrnoException).code === "ENOENT";
       if (isNotFound && attempt < FILE_READ_RETRIES) {
-        console.warn(`[worker] File not found, retrying in ${FILE_READ_RETRY_DELAY_MS}ms… (${filePath})`);
+        console.warn(`File not found, retrying in ${FILE_READ_RETRY_DELAY_MS}ms… (${filePath})`);
         await sleep(FILE_READ_RETRY_DELAY_MS);
       } else {
         break; // non-ENOENT error or final attempt — give up
@@ -84,7 +86,7 @@ const worker = new Worker<JobPayload, JobResult>(
   QUEUE_NAME,
   async (job: Job<JobPayload>): Promise<JobResult> => {
     const { filePath, uploadId, originalName, options, hash } = job.data;
-    const jobTag = `[worker] job ${job.id} (${originalName})`;
+    const jobTag = `job ${job.id} (${originalName})`;
 
     // Ensure all working directories exist before any file I/O
     await maybeCleanup().catch(() => {});
@@ -124,6 +126,7 @@ const worker = new Worker<JobPayload, JobResult>(
     // ── Progress: 50% — file read, compression starting ──────────────────────
     await job.updateProgress(50);
 
+    const compressStart = Date.now();
     let result: Awaited<ReturnType<typeof compressImage>>;
     try {
       result = await withTimeout(
@@ -136,6 +139,7 @@ const worker = new Worker<JobPayload, JobResult>(
       console.error(`${jobTag} — compression failed: ${msg} | filePath: ${resolvedPath}`);
       throw err; // BullMQ will mark the job as failed and apply retry/backoff
     }
+    const compressMs = Date.now() - compressStart;
 
     // ── Progress: 80% — compression done, writing cache ──────────────────────
     await job.updateProgress(80);
@@ -147,9 +151,9 @@ const worker = new Worker<JobPayload, JobResult>(
     await job.updateProgress(100);
 
     console.log(
-      `${jobTag} — ✓ done ${(result.compressedSize / 1024).toFixed(1)} KB ` +
-      `(${result.reductionPercent}% reduction) q${result.quality} ` +
-      `→ cache: ${path.basename(cacheEntry.filePath)}`
+      `${jobTag} — ✓ ${(result.originalSize / 1024).toFixed(1)}KB → ` +
+      `${(result.compressedSize / 1024).toFixed(1)}KB (${result.reductionPercent}% off) ` +
+      `q${result.quality} ${compressMs}ms`
     );
 
     return {
@@ -168,32 +172,33 @@ const worker = new Worker<JobPayload, JobResult>(
   {
     connection: getRedisConnection(),
     concurrency: CONCURRENCY,
+    skipVersionCheck: true,
   }
 );
 
 // ── Event handlers ────────────────────────────────────────────────────────────
 
 worker.on("completed", (job) => {
-  console.log(`[worker] ✅ Job ${job.id} completed`);
+  console.log(`✅ Job ${job.id} completed`);
 });
 
 worker.on("failed", (job, err) => {
-  console.error(`[worker] ❌ Job ${job?.id} failed: ${err.message}`);
+  console.error(`❌ Job ${job?.id} failed: ${err.message}`);
 });
 
 worker.on("error", (err) => {
-  console.error(`[worker] Worker error: ${err.message}`);
+  console.error(`Worker error: ${err.message}`);
 });
 
 console.log(
-  `[worker] 🚀 Started (concurrency: ${CONCURRENCY}, queue: "${QUEUE_NAME}", timeout: ${JOB_TIMEOUT_MS}ms)`
+  `🚀 Started (concurrency: ${CONCURRENCY}, queue: "${QUEUE_NAME}", timeout: ${JOB_TIMEOUT_MS}ms)`
 );
-console.log(`[worker] Waiting for jobs…`);
+console.log(`Waiting for jobs…`);
 
 // ── Graceful shutdown ─────────────────────────────────────────────────────────
 
 async function shutdown(signal: string) {
-  console.log(`[worker] ${signal} received — draining…`);
+  console.log(`${signal} received — draining…`);
   await worker.close();
   process.exit(0);
 }

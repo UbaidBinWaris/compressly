@@ -1030,7 +1030,7 @@ function ResultCard({ result }: { result: ProcessResult }) {
         </div>
       ) : (
         <p className="text-xs text-slate-500 text-center py-1">
-          Download will be available once FFmpeg processing is enabled.
+          Download will be available once real FFmpeg processing is wired up.
         </p>
       )}
     </motion.div>
@@ -1096,7 +1096,9 @@ export default function VideoPage() {
         originalSize: video.file.size,
         compressedSize: Math.round(video.file.size * 0.45),
         reductionPercent: 55,
-        outputUrl: null,   // no real output URL until FFmpeg is wired
+        // Use the original blob URL as a preview placeholder until FFmpeg is wired.
+        // This lets the processed player and download button work in the simulated flow.
+        outputUrl: video.objectUrl,
         outputName: `processed_${video.file.name.replace(/\.[^.]+$/, "")}.${vSettings.format}`,
         outputFormat: vSettings.format,
       });
@@ -1126,7 +1128,7 @@ export default function VideoPage() {
               <span className="text-base font-bold tracking-tight group-hover:text-indigo-300 transition-colors">Compressly</span>
             </Link>
             <nav className="hidden md:flex items-center gap-6">
-              <Link href="/tool"      className="text-sm text-slate-400 hover:text-slate-200 transition-colors font-medium">Images</Link>
+              <Link href="/image-processing"      className="text-sm text-slate-400 hover:text-slate-200 transition-colors font-medium">Images</Link>
               <span className="text-sm font-semibold text-violet-400">Video</span>
               <Link href="/docs"      className="text-sm text-slate-400 hover:text-slate-200 transition-colors font-medium">API Docs</Link>
               <Link href="/dashboard" className="text-sm text-slate-400 hover:text-slate-200 transition-colors font-medium">Dashboard</Link>
@@ -1136,7 +1138,7 @@ export default function VideoPage() {
             <span className="hidden sm:inline text-xs text-slate-500 font-medium bg-slate-800/80 border border-slate-700/50 px-3 py-1 rounded-full">
               Beta · FFmpeg powered
             </span>
-            <Link href="/tool" className="text-sm font-medium text-slate-400 hover:text-slate-200 transition-colors flex items-center gap-1.5">
+            <Link href="/image-processing" className="text-sm font-medium text-slate-400 hover:text-slate-200 transition-colors flex items-center gap-1.5">
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" />
               </svg>
@@ -1289,7 +1291,7 @@ export default function VideoPage() {
           </div>
           <div className="flex items-center gap-6 text-sm text-slate-500">
             <Link href="/"          className="hover:text-slate-300 transition-colors">Home</Link>
-            <Link href="/tool"      className="hover:text-slate-300 transition-colors">Images</Link>
+            <Link href="/image-processing"      className="hover:text-slate-300 transition-colors">Images</Link>
             <Link href="/docs"      className="hover:text-slate-300 transition-colors">API Docs</Link>
             <Link href="/dashboard" className="hover:text-slate-300 transition-colors">Dashboard</Link>
           </div>

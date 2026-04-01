@@ -77,6 +77,7 @@ export function getQueue(): Queue<JobPayload, JobResult> {
   if (!_queue) {
     _queue = new Queue<JobPayload, JobResult>(QUEUE_NAME, {
       connection: getRedisConnection(),
+      skipVersionCheck: true,
       defaultJobOptions: {
         removeOnComplete: { age: 7200 }, // keep completed jobs 2 hours
         removeOnFail: { age: 7200 },
@@ -94,6 +95,7 @@ export function getQueueEvents(): QueueEvents {
   if (!_queueEvents) {
     _queueEvents = new QueueEvents(QUEUE_NAME, {
       connection: getRedisConnection(),
+      skipVersionCheck: true,
     });
   }
   return _queueEvents;

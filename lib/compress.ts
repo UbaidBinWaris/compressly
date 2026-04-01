@@ -83,18 +83,7 @@ export async function compressImage(
   const formatOverridden = effectiveFormat !== format;
 
   // ── 3. Build resized base buffer ─────────────────────────────────────────
-  let base = stripMetadata
-    ? sharp(buffer, { limitInputPixels: PIXEL_LIMIT })
-    : sharp(buffer, { limitInputPixels: PIXEL_LIMIT }).withMetadata();
-  if (resize && (resize.width || resize.height)) {
-    base = base.resize({
-      width: resize.width ?? undefined,
-      height: resize.height ?? undefined,
-      fit: resize.maintainAspect ? "inside" : "fill",
-      withoutEnlargement: true,
-    });
-  }
-  const baseBuffer = await base.toBuffer();
+  const baseBuffer = await buildBaseBuffer(buffer, resize, stripMetadata);
 
   const originalSize = buffer.byteLength;
   const maxBytes = targetSizeKB * 1024;
@@ -102,54 +91,12 @@ export async function compressImage(
   // ── 4. Output filename: basename_timestamp_qQuality.ext ─────────────────
   const ext = formatExt(effectiveFormat);
   const fileBase = sanitizeBasename(path.basename(originalName, path.extname(originalName)));
-  // Quality placeholder — will be filled after encoding
   const ts = Date.now();
 
   // ── 5. Encode ─────────────────────────────────────────────────────────────
-  let outputBuffer: Buffer;
-  let finalQuality: number;
-
-  if (effectiveFormat === "png") {
-    // PNG is lossless — binary search doesn't apply.
-    // compressionLevel 9 = smallest possible lossless file.
-    outputBuffer = await encodePng(baseBuffer);
-    finalQuality = 9; // compressionLevel
-  } else {
-    // Early exit: if max quality already fits, use it.
-    const earlyCandidate = await encodeBuffer(baseBuffer, effectiveFormat, qualityStart);
-    if (earlyCandidate.byteLength <= maxBytes) {
-      outputBuffer = earlyCandidate;
-      finalQuality = qualityStart;
-    } else {
-      // Binary search for highest quality that still fits.
-      let lo = qualityMin;
-      let hi = qualityStart - 1;
-      let bestBuffer: Buffer | null = null;
-      let bestQuality = qualityMin;
-
-      while (lo <= hi) {
-        const mid = Math.floor((lo + hi) / 2);
-        const candidate = await encodeBuffer(baseBuffer, effectiveFormat, mid);
-
-        if (candidate.byteLength <= maxBytes) {
-          bestBuffer = candidate;
-          bestQuality = mid;
-          lo = mid + 1; // fits — try higher quality
-        } else {
-          hi = mid - 1; // too large — try lower
-        }
-      }
-
-      // Fallback if nothing fit (very large or complex image)
-      if (bestBuffer) {
-        outputBuffer = bestBuffer;
-        finalQuality = bestQuality;
-      } else {
-        outputBuffer = await encodeBuffer(baseBuffer, effectiveFormat, qualityMin);
-        finalQuality = qualityMin;
-      }
-    }
-  }
+  const { outputBuffer, finalQuality } = await encodeToTarget(
+    baseBuffer, effectiveFormat, originalSize, maxBytes, qualityStart, qualityMin
+  );
 
   // ── 6. Write output with quality-stamped filename ─────────────────────────
   const outputName = `${fileBase}_${ts}_q${finalQuality}.${ext}`;
@@ -178,6 +125,82 @@ export async function compressImage(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+async function buildBaseBuffer(
+  buffer: Buffer,
+  resize: CompressionOptions["resize"],
+  stripMetadata: boolean
+): Promise<Buffer> {
+  let base = stripMetadata
+    ? sharp(buffer, { limitInputPixels: PIXEL_LIMIT })
+    : sharp(buffer, { limitInputPixels: PIXEL_LIMIT }).withMetadata();
+  if (resize && (resize.width || resize.height)) {
+    base = base.resize({
+      width: resize.width ?? undefined,
+      height: resize.height ?? undefined,
+      fit: resize.maintainAspect ? "inside" : "fill",
+      withoutEnlargement: true,
+    });
+  }
+  return base.toBuffer();
+}
+
+async function encodeToTarget(
+  baseBuffer: Buffer,
+  format: CompressionOptions["format"],
+  originalSize: number,
+  maxBytes: number,
+  qualityStart: number,
+  qualityMin: number
+): Promise<{ outputBuffer: Buffer; finalQuality: number }> {
+  if (format === "png") {
+    return { outputBuffer: await encodePng(baseBuffer), finalQuality: 9 };
+  }
+
+  // Input already fits the budget — encode once at max quality, skip binary search.
+  if (originalSize <= maxBytes) {
+    return { outputBuffer: await encodeBuffer(baseBuffer, format, qualityStart), finalQuality: qualityStart };
+  }
+
+  // Early exit: max quality already fits.
+  const earlyCandidate = await encodeBuffer(baseBuffer, format, qualityStart);
+  if (earlyCandidate.byteLength <= maxBytes) {
+    return { outputBuffer: earlyCandidate, finalQuality: qualityStart };
+  }
+
+  return binarySearchEncode(baseBuffer, format, maxBytes, qualityStart, qualityMin);
+}
+
+async function binarySearchEncode(
+  baseBuffer: Buffer,
+  format: Exclude<CompressionOptions["format"], "png">,
+  maxBytes: number,
+  qualityStart: number,
+  qualityMin: number
+): Promise<{ outputBuffer: Buffer; finalQuality: number }> {
+  let lo = qualityMin;
+  let hi = qualityStart - 1;
+  let bestBuffer: Buffer | null = null;
+  let bestQuality = qualityMin;
+
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const candidate = await encodeBuffer(baseBuffer, format, mid);
+    if (candidate.byteLength <= maxBytes) {
+      bestBuffer = candidate;
+      bestQuality = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+
+  if (bestBuffer) {
+    return { outputBuffer: bestBuffer, finalQuality: bestQuality };
+  }
+  // Fallback: nothing fit — use minimum quality
+  return { outputBuffer: await encodeBuffer(baseBuffer, format, qualityMin), finalQuality: qualityMin };
+}
 
 async function encodeBuffer(
   buf: Buffer,

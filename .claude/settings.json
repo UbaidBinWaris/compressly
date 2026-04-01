@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(sed -i 's|{ label: \"Tool\", href: \"/tool\" }|{ label: \"Image Processing\", href: \"/image-processing\" }|g' /c/Users/PMLS/Documents/GitHub/compressly/app/page.tsx)",
+      "Bash(sed -i 's|href=\"/tool\"|href=\"/image-processing\"|g' /c/Users/PMLS/Documents/GitHub/compressly/app/video/page.tsx)"
+    ]
+  }
+}

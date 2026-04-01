@@ -505,7 +505,7 @@ export default function Home() {
               {[
                 { label: "Features", href: "#features" },
                 { label: "How It Works", href: "#how" },
-                { label: "Tool", href: "/tool" },
+                { label: "Image Processing", href: "/image-processing" },
                 { label: "Video", href: "/video" },
                 { label: "API Docs", href: "/docs" },
                 { label: "Dashboard", href: "/dashboard" },
@@ -525,7 +525,7 @@ export default function Home() {
               Free · No login
             </span>
             <Link
-              href="/tool"
+              href="/image-processing"
               className="text-sm font-semibold bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg transition-colors"
             >
               Start Free →
@@ -602,7 +602,7 @@ export default function Home() {
             className="flex flex-wrap justify-center gap-3 pt-2"
           >
             <Link
-              href="/tool"
+              href="/image-processing"
               className="inline-flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold px-6 py-3 rounded-xl transition-colors text-sm shadow-lg shadow-indigo-950/50"
             >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -834,7 +834,7 @@ export default function Home() {
             </p>
             <div className="relative flex flex-wrap justify-center gap-3">
               <Link
-                href="/tool"
+                href="/image-processing"
                 className="inline-flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold px-7 py-3.5 rounded-xl transition-colors shadow-lg shadow-indigo-950/60"
               >
                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -870,7 +870,7 @@ export default function Home() {
           <div className="flex items-center gap-6 text-sm text-slate-500">
             <Link href="/docs" className="hover:text-slate-300 transition-colors">API Docs</Link>
             <Link href="/dashboard" className="hover:text-slate-300 transition-colors">Dashboard</Link>
-            <Link href="/tool" className="hover:text-slate-300 transition-colors">Compress</Link>
+            <Link href="/image-processing" className="hover:text-slate-300 transition-colors">Compress</Link>
           </div>
         </div>
       </footer>

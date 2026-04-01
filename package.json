@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "dev:all": "concurrently -n \"next,worker\" -c \"cyan,yellow\" \"next dev\" \"tsx workers/compressionWorker.ts\"",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
@@ -31,6 +32,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/uuid": "^10.0.0",
+    "concurrently": "^9.2.1",
     "eslint": "^9",
     "eslint-config-next": "16.2.1",
     "tailwindcss": "^4",

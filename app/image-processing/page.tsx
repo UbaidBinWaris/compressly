@@ -480,7 +480,7 @@ export default function ToolPage() {
               </span>
             </Link>
             <nav className="hidden md:flex items-center gap-6">
-              <span className="text-sm font-semibold text-indigo-400">Tool</span>
+              <span className="text-sm font-semibold text-indigo-400">Image Processing</span>
               {[
                 { label: "Video", href: "/video" },
                 { label: "API Docs", href: "/docs" },
