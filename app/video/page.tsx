@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import Link from "next/link";
 
@@ -23,10 +23,15 @@ interface VideoSettings {
 }
 
 interface AudioSettings {
-  musicFile:   File | null;
-  musicVolume: number;      // 0–100
-  musicLoop:   boolean;
-  audioMode:   AudioMode;
+  musicFile:        File | null;
+  musicVolume:      number;   // 0–100 — mix level of added track
+  musicLoop:        boolean;  // repeat audio to fill video length
+  loopVideo:        boolean;  // repeat video until audio ends
+  audioMode:        AudioMode;
+  audioStartOffset: number;   // seconds before audio kicks in
+  fadeIn:           number;   // fade-in duration (0 = off)
+  fadeOut:          number;   // fade-out duration (0 = off)
+  normalize:        boolean;  // auto-level the audio track
 }
 
 interface SubtitleSettings {
@@ -53,6 +58,8 @@ interface ProcessResult {
   outputUrl:       string | null;   // null when output is not yet available (e.g. simulated)
   outputName:      string;
   outputFormat:    string;
+  hasAudio:        boolean;
+  isSimulated:     boolean;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -61,8 +68,16 @@ interface ProcessResult {
 
 const ACCEPTED_VIDEO_MIME  = new Set(["video/mp4", "video/quicktime", "video/webm"]);
 const ACCEPTED_VIDEO_EXT   = new Set([".mp4", ".mov", ".webm"]);
-const ACCEPTED_AUDIO_MIME  = new Set(["audio/mpeg", "audio/wav", "audio/wave", "audio/x-wav"]);
-const ACCEPTED_AUDIO_EXT   = new Set([".mp3", ".wav"]);
+const ACCEPTED_AUDIO_MIME  = new Set([
+  "audio/mpeg", "audio/mp3",
+  "audio/wav",  "audio/wave", "audio/x-wav",
+  "audio/ogg",  "audio/vorbis",
+  "audio/aac",  "audio/x-aac",
+  "audio/flac", "audio/x-flac",
+  "audio/mp4",  "audio/x-m4a",
+  "audio/webm",
+]);
+const ACCEPTED_AUDIO_EXT   = new Set([".mp3", ".wav", ".ogg", ".aac", ".flac", ".m4a", ".opus"]);
 const MAX_VIDEO_BYTES       = 500 * 1024 * 1024;
 const MAX_AUDIO_BYTES       = 50  * 1024 * 1024;
 
@@ -75,7 +90,10 @@ const BITRATE_META: Record<Bitrate, { label: string; detail: string }> = {
 };
 
 const DEFAULT_VIDEO: VideoSettings    = { format: "mp4",    resolution: "720p",   bitrate: "medium" };
-const DEFAULT_AUDIO: AudioSettings    = { musicFile: null,  musicVolume: 80, musicLoop: false, audioMode: "mix" };
+const DEFAULT_AUDIO: AudioSettings    = {
+  musicFile: null, musicVolume: 80, musicLoop: false, loopVideo: false,
+  audioMode: "mix", audioStartOffset: 0, fadeIn: 0, fadeOut: 0, normalize: false,
+};
 const DEFAULT_SUBS:  SubtitleSettings = {
   srtFile: null, fontFamily: "Arial", fontSize: 22,
   fontColor: "#ffffff", bgColor: "#00000080",
@@ -192,7 +210,7 @@ function VideoDropZone({ onFile, disabled }: { onFile: (f: File) => void; disabl
 // useVideoPlayer — encapsulates all video element state and event handling
 // ─────────────────────────────────────────────────────────────────────────────
 
-function useVideoPlayer(src: string | null) {
+function useVideoPlayer() {
   const ref      = useRef<HTMLVideoElement>(null);
   const [playing,   setPlaying]   = useState(false);
   const [current,   setCurrent]   = useState(0);
@@ -201,15 +219,6 @@ function useVideoPlayer(src: string | null) {
   const [muted,     setMuted]     = useState(false);
   const [ready,     setReady]     = useState(false);   // metadata loaded
   const [playError, setPlayError] = useState<string | null>(null);
-
-  // Reset state whenever the source changes
-  useEffect(() => {
-    setPlaying(false);
-    setCurrent(0);
-    setDuration(0);
-    setReady(false);
-    setPlayError(null);
-  }, [src]);
 
   // Keep video.volume in sync with state (avoids direct DOM manipulation everywhere)
   useEffect(() => {
@@ -317,12 +326,10 @@ function VideoPlayer({
   label: string;
   accentClass?: string;
 }) {
-  console.log("[VideoPlayer] src:", src, "label:", label);
-
   const {
     ref, playing, current, duration, volume, muted, ready, playError,
     togglePlay, seek, changeVolume, toggleMute, handlers,
-  } = useVideoPlayer(src);
+  } = useVideoPlayer();
 
   // Never render a video element for invalid/placeholder sources
   if (!isValidMediaSrc(src)) {
@@ -528,13 +535,23 @@ function BeforeAfterPlayers({ original, result }: { original: VideoFile; result:
 
       {view === "split" ? (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <VideoPlayer src={original.objectUrl}  label="Original"  accentClass="bg-slate-500" />
-          <VideoPlayer src={result.outputUrl}    label="Processed" accentClass="bg-violet-500" />
+          <VideoPlayer key={original.objectUrl}              src={original.objectUrl}  label="Original"  accentClass="bg-slate-500" />
+          <VideoPlayer
+            key={result.outputUrl ?? "no-output"}
+            src={result.outputUrl}
+            label={result.isSimulated ? "Processed (simulated preview)" : "Processed"}
+            accentClass="bg-violet-500"
+          />
         </div>
       ) : view === "before" ? (
-        <VideoPlayer src={original.objectUrl} label="Original" accentClass="bg-slate-500" />
+        <VideoPlayer key={original.objectUrl}              src={original.objectUrl} label="Original"  accentClass="bg-slate-500" />
       ) : (
-        <VideoPlayer src={result.outputUrl}   label="Processed" accentClass="bg-violet-500" />
+        <VideoPlayer
+          key={result.outputUrl ?? "no-output"}
+          src={result.outputUrl}
+          label={result.isSimulated ? "Processed (simulated preview)" : "Processed"}
+          accentClass="bg-violet-500"
+        />
       )}
     </div>
   );
@@ -569,7 +586,7 @@ function Toggle({ checked, onChange, disabled }: { checked: boolean; onChange: (
 // ─────────────────────────────────────────────────────────────────────────────
 
 function FilePicker({
-  file, accept, label, hint, maxBytes, validator, onChange, disabled,
+  file, accept, label, hint, maxBytes, validator, onChange, onSelect, disabled,
 }: {
   file: File | null;
   accept: string;
@@ -578,6 +595,7 @@ function FilePicker({
   maxBytes: number;
   validator: (f: File) => boolean;
   onChange: (f: File | null) => void;
+  onSelect?: () => void;
   disabled?: boolean;
 }) {
   const [error, setError] = useState<string | null>(null);
@@ -587,6 +605,7 @@ function FilePicker({
     if (!validator(f))         return setError(`Unsupported file type.`);
     if (f.size > maxBytes)     return setError(`Too large (max ${fmtBytes(maxBytes)}).`);
     setError(null);
+    onSelect?.();
     onChange(f);
   };
 
@@ -625,6 +644,138 @@ function FilePicker({
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// AudioPreviewPlayer
+// ─────────────────────────────────────────────────────────────────────────────
+
+function AudioPreviewPlayer({ file }: Readonly<{ file: File }>) {
+  const audioRef   = useRef<HTMLAudioElement>(null);
+  const [url]      = useState(() => URL.createObjectURL(file));
+  const [playing,  setPlaying]  = useState(false);
+  const [current,  setCurrent]  = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => () => URL.revokeObjectURL(url), [url]);
+
+  // Imperative listeners solve the race condition: with blob: URLs the browser
+  // loads metadata synchronously, so `loadedmetadata` fires before React can
+  // attach synthetic event handlers.  The readyState guard catches that case.
+  useEffect(() => {
+    const el = audioRef.current;
+    if (!el || !url) return;
+    const onMeta  = () => setDuration(el.duration);
+    const onTime  = () => setCurrent(el.currentTime);
+    const onEnded = () => { setPlaying(false); setCurrent(0); };
+    const onPause = () => setPlaying(false);
+    const onPlay  = () => setPlaying(true);
+    const onError = () => {
+      setPlaying(false);
+      setError("Audio preview failed to load. Try MP3, M4A, or OGG.");
+    };
+    el.addEventListener("loadedmetadata", onMeta);
+    el.addEventListener("timeupdate",     onTime);
+    el.addEventListener("ended",          onEnded);
+    el.addEventListener("pause",          onPause);
+    el.addEventListener("play",           onPlay);
+    el.addEventListener("error",          onError);
+    // Guard: metadata might already be loaded before this effect runs.
+    if (el.readyState >= HTMLMediaElement.HAVE_METADATA) onMeta();
+    return () => {
+      el.removeEventListener("loadedmetadata", onMeta);
+      el.removeEventListener("timeupdate",     onTime);
+      el.removeEventListener("ended",          onEnded);
+      el.removeEventListener("pause",          onPause);
+      el.removeEventListener("play",           onPlay);
+      el.removeEventListener("error",          onError);
+    };
+  }, [url]);
+
+  const togglePlay = () => {
+    const el = audioRef.current;
+    if (!el || !url) return;
+    if (playing) {
+      el.pause();
+      setPlaying(false);
+    } else {
+      el.play()
+        .then(() => {
+          setPlaying(true);
+          setError(null);
+        })
+        .catch(() => {
+          setPlaying(false);
+          setError("Audio preview is blocked by the browser or unsupported.");
+        });
+    }
+  };
+
+  const seek = (e: ChangeEvent<HTMLInputElement>) => {
+    const t = Number(e.target.value);
+    if (audioRef.current) audioRef.current.currentTime = t;
+    setCurrent(t);
+  };
+
+  const pct = duration > 0 ? (current / duration) * 100 : 0;
+
+  return (
+    <div className="flex flex-col gap-2.5 rounded-xl border border-slate-700/50 bg-slate-900/60 p-3">
+      {/* File info */}
+      <div className="flex items-center gap-2.5">
+        <div className="w-7 h-7 rounded-lg bg-violet-500/15 flex items-center justify-center shrink-0">
+          <svg className="w-3.5 h-3.5 text-violet-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round"
+              d="M9 9l10.5-3m0 6.553v3.75a2.25 2.25 0 01-1.632 2.163l-1.32.377a1.803 1.803 0 11-.99-3.467l2.31-.66a2.25 2.25 0 001.632-2.163zm0 0V2.25L9 5.25v10.303m0 0v3.75a2.25 2.25 0 01-1.632 2.163l-1.32.377a1.803 1.803 0 01-.99-3.467l2.31-.66A2.25 2.25 0 009 15.553z" />
+          </svg>
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-xs font-medium text-slate-200 truncate">{file.name}</p>
+          <p className="text-[10px] text-slate-500">
+            {fmtBytes(file.size)}{duration > 0 ? ` · ${fmtTime(duration)}` : ""}
+          </p>
+        </div>
+      </div>
+
+      {/* Controls */}
+      <div className="flex items-center gap-3">
+        <button onClick={togglePlay}
+          className="w-8 h-8 rounded-full bg-violet-600 hover:bg-violet-500 active:bg-violet-700 flex items-center justify-center shrink-0 transition-colors">
+          {playing ? (
+            <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 24 24">
+              <rect x="6" y="4" width="4" height="16" rx="1" />
+              <rect x="14" y="4" width="4" height="16" rx="1" />
+            </svg>
+          ) : (
+            <svg className="w-3 h-3 text-white ml-0.5" fill="currentColor" viewBox="0 0 24 24">
+              <path d="M5 3.868v16.264c0 1.12 1.248 1.772 2.162 1.14l12.37-8.131a1.4 1.4 0 000-2.282L7.162 2.728C6.248 2.096 5 2.748 5 3.868z" />
+            </svg>
+          )}
+        </button>
+
+        <div className="flex-1 flex flex-col gap-1">
+          <div className="relative h-4 flex items-center">
+            <div className="absolute inset-x-0 h-1 rounded-full bg-slate-700 overflow-hidden">
+              <div className="h-full rounded-full bg-violet-500 transition-none" style={{ width: `${pct}%` }} />
+            </div>
+            <input type="range" min={0} max={duration || 1} step={0.1} value={current}
+              onChange={seek}
+              className="absolute inset-0 w-full opacity-0 cursor-pointer" />
+          </div>
+          <div className="flex justify-between text-[10px] text-slate-500 font-mono">
+            <span>{fmtTime(current)}</span>
+            <span>{duration > 0 ? fmtTime(duration) : "--:--"}</span>
+          </div>
+        </div>
+      </div>
+
+      {error && <p className="text-[11px] text-amber-300">{error}</p>}
+
+      {/* No synthetic event handlers needed — imperative listeners above handle everything */}
+      <audio ref={audioRef} src={url || undefined} preload="auto" style={{ display: "none" }} />
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Settings Panel — tabbed: Video / Audio / Subtitles
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -640,6 +791,7 @@ function SettingsPanel({
   disabled: boolean;
 }) {
   const [tab, setTab] = useState<SettingsTab>("video");
+  const [audioPreviewNonce, setAudioPreviewNonce] = useState(0);
 
   const TABS: { id: SettingsTab; label: string; dot?: boolean }[] = [
     { id: "video",     label: "Video" },
@@ -734,71 +886,178 @@ function SettingsPanel({
         {/* ── Audio tab ─────────────────────────────────────────────────── */}
         {tab === "audio" && (
           <>
-            {/* Music file */}
+            {/* File picker */}
             <FilePicker
               file={audio.musicFile}
-              accept=".mp3,.wav,audio/mpeg,audio/wav"
+              accept=".mp3,.wav,.ogg,.aac,.flac,.m4a,.opus,audio/*"
               label="Background Music"
-              hint="Upload MP3 or WAV…"
+              hint="Upload audio file (MP3, WAV, OGG, AAC, FLAC, M4A…)"
               maxBytes={MAX_AUDIO_BYTES}
               validator={isAudio}
+              onSelect={() => setAudioPreviewNonce((value) => value + 1)}
               onChange={(f) => onAudio({ ...audio, musicFile: f })}
               disabled={disabled}
             />
 
-            {/* Volume */}
             {audio.musicFile && (
-              <div className="flex flex-col gap-2">
-                <div className="flex justify-between items-center">
-                  <label className="text-xs font-semibold text-slate-300">Volume</label>
-                  <span className="text-xs font-bold text-violet-400">{audio.musicVolume}%</span>
-                </div>
-                <div className="relative h-5 flex items-center">
-                  <div className="absolute inset-x-0 h-1.5 rounded-full bg-slate-700 overflow-hidden">
-                    <div className="h-full rounded-full bg-violet-500" style={{ width: `${audio.musicVolume}%` }} />
+              <>
+                {/* Preview player — keyed by file so it remounts on new file */}
+                <AudioPreviewPlayer key={audioPreviewNonce} file={audio.musicFile} />
+
+                {/* WAV / FLAC warning — large uncompressed files, suggest MP3 */}
+                {/\.(wav|flac)$/i.test(audio.musicFile.name) && (
+                  <div className="flex items-start gap-2 bg-amber-500/10 border border-amber-500/20 rounded-xl px-3 py-2.5">
+                    <svg className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+                    </svg>
+                    <p className="text-[11px] text-amber-300 leading-relaxed">
+                      WAV files are uncompressed and large. For smaller output and faster processing, use MP3 instead.
+                    </p>
                   </div>
-                  <input type="range" min={0} max={100} value={audio.musicVolume}
-                    onChange={(e) => onAudio({ ...audio, musicVolume: Number(e.target.value) })}
-                    disabled={disabled}
-                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer disabled:cursor-not-allowed" />
+                )}
+
+                <div className="border-t border-slate-800" />
+
+                {/* ── Playback behavior ───────────────────────────────────── */}
+                <div className="flex flex-col gap-3">
+                  <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Playback</p>
+
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-xs font-medium text-slate-300">Loop audio</p>
+                      <p className="text-[11px] text-slate-500 mt-0.5">Repeat audio to fill video length</p>
+                    </div>
+                    <Toggle checked={audio.musicLoop} onChange={(v) => onAudio({ ...audio, musicLoop: v })} disabled={disabled} />
+                  </div>
+
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-xs font-medium text-slate-300">Loop video</p>
+                      <p className="text-[11px] text-slate-500 mt-0.5">Repeat video until audio ends</p>
+                    </div>
+                    <Toggle checked={audio.loopVideo} onChange={(v) => onAudio({ ...audio, loopVideo: v })} disabled={disabled} />
+                  </div>
                 </div>
-              </div>
+
+                <div className="border-t border-slate-800" />
+
+                {/* ── Volume ──────────────────────────────────────────────── */}
+                <div className="flex flex-col gap-2">
+                  <div className="flex justify-between items-center">
+                    <p className="text-xs font-semibold text-slate-300">Volume</p>
+                    <span className="text-xs font-bold text-violet-400">{audio.musicVolume}%</span>
+                  </div>
+                  <div className="relative h-5 flex items-center">
+                    <div className="absolute inset-x-0 h-1.5 rounded-full bg-slate-700 overflow-hidden">
+                      <div className="h-full rounded-full bg-violet-500" style={{ width: `${audio.musicVolume}%` }} />
+                    </div>
+                    <input type="range" min={0} max={100} value={audio.musicVolume}
+                      onChange={(e) => onAudio({ ...audio, musicVolume: Number(e.target.value) })}
+                      disabled={disabled}
+                      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer disabled:cursor-not-allowed" />
+                  </div>
+                </div>
+
+                <div className="border-t border-slate-800" />
+
+                {/* ── Timing ──────────────────────────────────────────────── */}
+                <div className="flex flex-col gap-3">
+                  <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Timing</p>
+
+                  <div className="flex flex-col gap-1.5">
+                    <div className="flex justify-between items-center">
+                      <p className="text-xs font-medium text-slate-300">Start offset</p>
+                      <span className="text-xs font-bold text-violet-400">{audio.audioStartOffset}s</span>
+                    </div>
+                    <p className="text-[11px] text-slate-500">Delay before audio begins</p>
+                    <div className="relative h-5 flex items-center">
+                      <div className="absolute inset-x-0 h-1.5 rounded-full bg-slate-700 overflow-hidden">
+                        <div className="h-full rounded-full bg-violet-500" style={{ width: `${(audio.audioStartOffset / 30) * 100}%` }} />
+                      </div>
+                      <input type="range" min={0} max={30} step={0.5} value={audio.audioStartOffset}
+                        onChange={(e) => onAudio({ ...audio, audioStartOffset: Number(e.target.value) })}
+                        disabled={disabled}
+                        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer disabled:cursor-not-allowed" />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="flex flex-col gap-1.5">
+                      <div className="flex justify-between">
+                        <p className="text-xs font-medium text-slate-300">Fade in</p>
+                        <span className="text-xs font-bold text-violet-400">{audio.fadeIn}s</span>
+                      </div>
+                      <div className="relative h-5 flex items-center">
+                        <div className="absolute inset-x-0 h-1.5 rounded-full bg-slate-700 overflow-hidden">
+                          <div className="h-full rounded-full bg-violet-500" style={{ width: `${(audio.fadeIn / 10) * 100}%` }} />
+                        </div>
+                        <input type="range" min={0} max={10} step={0.5} value={audio.fadeIn}
+                          onChange={(e) => onAudio({ ...audio, fadeIn: Number(e.target.value) })}
+                          disabled={disabled}
+                          className="absolute inset-0 w-full h-full opacity-0 cursor-pointer disabled:cursor-not-allowed" />
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col gap-1.5">
+                      <div className="flex justify-between">
+                        <p className="text-xs font-medium text-slate-300">Fade out</p>
+                        <span className="text-xs font-bold text-violet-400">{audio.fadeOut}s</span>
+                      </div>
+                      <div className="relative h-5 flex items-center">
+                        <div className="absolute inset-x-0 h-1.5 rounded-full bg-slate-700 overflow-hidden">
+                          <div className="h-full rounded-full bg-violet-500" style={{ width: `${(audio.fadeOut / 10) * 100}%` }} />
+                        </div>
+                        <input type="range" min={0} max={10} step={0.5} value={audio.fadeOut}
+                          onChange={(e) => onAudio({ ...audio, fadeOut: Number(e.target.value) })}
+                          disabled={disabled}
+                          className="absolute inset-0 w-full h-full opacity-0 cursor-pointer disabled:cursor-not-allowed" />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="border-t border-slate-800" />
+
+                {/* ── Processing ──────────────────────────────────────────── */}
+                <div className="flex flex-col gap-3">
+                  <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Processing</p>
+
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-xs font-medium text-slate-300">Normalize audio</p>
+                      <p className="text-[11px] text-slate-500 mt-0.5">Auto-level track to consistent volume</p>
+                    </div>
+                    <Toggle checked={audio.normalize} onChange={(v) => onAudio({ ...audio, normalize: v })} disabled={disabled} />
+                  </div>
+
+                  <div className="flex flex-col gap-2">
+                    <p className="text-xs font-medium text-slate-300">Original audio</p>
+                    <div className="grid grid-cols-2 gap-2">
+                      {(["mix", "replace"] as AudioMode[]).map((m) => (
+                        <button key={m} disabled={disabled} onClick={() => onAudio({ ...audio, audioMode: m })}
+                          className={[
+                            "flex flex-col items-center py-2.5 rounded-xl text-xs font-semibold border gap-0.5 transition-all",
+                            audio.audioMode === m ? "bg-violet-600/20 border-violet-500/50 text-violet-300"
+                                                  : "bg-slate-800/40 border-slate-700/40 text-slate-400 hover:text-slate-300",
+                            disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer",
+                          ].join(" ")}>
+                          <span className="capitalize">{m}</span>
+                          <span className="text-[10px] font-normal opacity-60">
+                            {m === "replace" ? "Remove original" : "Blend together"}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </>
             )}
 
-            {/* Loop */}
-            {audio.musicFile && (
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-slate-300">Loop audio</span>
-                <Toggle checked={audio.musicLoop} onChange={(v) => onAudio({ ...audio, musicLoop: v })} disabled={disabled} />
-              </div>
-            )}
-
-            {/* Divider */}
-            <div className="border-t border-slate-800" />
-
-            {/* Voice mode */}
-            <div className="flex flex-col gap-2">
-              <label className="text-xs font-semibold text-slate-300">Voice / Audio Track</label>
-              <p className="text-[11px] text-slate-500 leading-relaxed">
-                When background music is added, choose how it combines with the original audio.
+            {!audio.musicFile && (
+              <p className="text-[11px] text-slate-500 text-center py-2">
+                Upload a track above to see audio options.
               </p>
-              <div className="grid grid-cols-2 gap-2">
-                {(["replace", "mix"] as AudioMode[]).map((m) => (
-                  <button key={m} disabled={disabled} onClick={() => onAudio({ ...audio, audioMode: m })}
-                    className={[
-                      "flex flex-col items-center py-3 rounded-xl text-xs font-semibold border gap-1 transition-all",
-                      audio.audioMode === m ? "bg-violet-600/20 border-violet-500/50 text-violet-300"
-                                            : "bg-slate-800/40 border-slate-700/40 text-slate-400 hover:text-slate-300",
-                      disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer",
-                    ].join(" ")}>
-                    <span className="capitalize">{m}</span>
-                    <span className="text-[10px] font-normal opacity-60">
-                      {m === "replace" ? "Remove original" : "Blend together"}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </div>
+            )}
           </>
         )}
 
@@ -989,29 +1248,71 @@ function StatusBar({ status, error, progress }: { status: JobStatus; error: stri
 
 function ResultCard({ result }: { result: ProcessResult }) {
   const [copied, setCopied] = useState(false);
-  const hasOutput = isValidMediaSrc(result.outputUrl);
+  const hasOutput = isValidMediaSrc(result.outputUrl) && !result.isSimulated;
   const copy = async () => {
     if (!result.outputUrl) return;
-    await navigator.clipboard.writeText(window.location.origin + result.outputUrl).catch(() => {});
+    await navigator.clipboard.writeText(globalThis.location.origin + result.outputUrl).catch(() => {});
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
+  const larger = result.reductionPercent < 0;
   return (
     <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
-      className="rounded-2xl border border-emerald-500/20 bg-linear-to-b from-emerald-500/10 to-transparent p-5 flex flex-col gap-4">
+      className={[
+        "rounded-2xl border p-5 flex flex-col gap-4",
+        larger
+          ? "border-amber-500/20 bg-amber-500/5"
+          : "border-emerald-500/20 bg-emerald-500/10",
+      ].join(" ")}>
       <div className="grid grid-cols-3 gap-3">
-        {[
-          { label: "Original",   value: fmtBytes(result.originalSize),   color: "text-slate-300"  },
-          { label: "Compressed", value: fmtBytes(result.compressedSize),  color: "text-emerald-300"},
-          { label: "Reduction",  value: `${result.reductionPercent}%`,    color: "text-emerald-400"},
-        ].map(({ label, value, color }) => (
+        {([
+          { label: "Original",  value: fmtBytes(result.originalSize),  color: "text-slate-300"  },
+          { label: "Output",    value: fmtBytes(result.compressedSize), color: larger ? "text-amber-300" : "text-emerald-300" },
+          {
+            label: larger ? "Larger by" : "Reduction",
+            value: larger
+              ? `+${Math.abs(result.reductionPercent)}%`
+              : `${result.reductionPercent}%`,
+            color: larger ? "text-amber-400" : "text-emerald-400",
+          },
+        ] as const).map(({ label, value, color }) => (
           <div key={label} className="flex flex-col gap-1 text-center">
             <p className={`text-lg font-bold ${color}`}>{value}</p>
             <p className="text-[10px] text-slate-500 font-medium">{label}</p>
           </div>
         ))}
       </div>
+      {result.isSimulated && (
+        <div className="flex items-start gap-2 bg-slate-800/70 border border-slate-700/60 rounded-xl px-3 py-2">
+          <svg className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.09.664v5.25a.75.75 0 01-1.5 0v-5.25a.75.75 0 01.369-.644zM12 8.25h.008v.008H12V8.25z" />
+            <path strokeLinecap="round" strokeLinejoin="round" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <p className="text-[11px] text-slate-400 leading-relaxed">
+            Processing is currently simulated. Preview uses your original video source and final downloadable output will appear when FFmpeg backend processing is enabled.
+          </p>
+        </div>
+      )}
+      {larger && (
+        <div className="flex items-start gap-2 bg-amber-500/10 border border-amber-500/20 rounded-xl px-3 py-2">
+          <svg className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+          </svg>
+          <p className="text-[11px] text-amber-300 leading-relaxed">
+            Output is larger because Loop Video extends the clip to fill the audio track.
+            Turn off Loop Video or use a shorter audio file to reduce output size.
+          </p>
+        </div>
+      )}
+      {result.hasAudio && (
+        <div className="flex items-center gap-2 bg-violet-500/10 border border-violet-500/20 rounded-xl px-3 py-2">
+          <svg className="w-3.5 h-3.5 text-violet-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53L6.75 15.75H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.757 3.63 8.25 4.51 8.25H6.75z" />
+          </svg>
+          <span className="text-[11px] text-violet-300 font-medium">Background audio track will be embedded on real FFmpeg processing</span>
+        </div>
+      )}
       <div className="border-t border-slate-700/50" />
       {hasOutput ? (
         <div className="flex gap-2">
@@ -1069,7 +1370,7 @@ export default function VideoPage() {
     const vid = document.createElement("video");
     vid.preload = "metadata";
     vid.onloadedmetadata = () => {
-      setVideo((prev) => prev ? { ...prev, duration: isFinite(vid.duration) ? vid.duration : null } : prev);
+      setVideo((prev) => prev ? { ...prev, duration: Number.isFinite(vid.duration) ? vid.duration : null } : prev);
       URL.revokeObjectURL(probeUrl);
     };
     vid.onerror = () => URL.revokeObjectURL(probeUrl);
@@ -1083,31 +1384,84 @@ export default function VideoPage() {
 
   const handleProcess = useCallback(async () => {
     if (!video) return;
-    setStatus("uploading"); setProgress(0); setResult(null); setError(null);
+    setStatus("uploading");
+    setProgress(0);
+    setResult(null);
+    setError(null);
     try {
-      // ── Placeholder — replace with real API call when FFmpeg is wired ──
-      // const form = new FormData();
-      // form.append("file", video.file);
-      // form.append("options", JSON.stringify({ video: vSettings, audio: aSettings, subtitles: sSettings }));
-      // const res = await fetch("/api/video/process", { method: "POST", body: form });
-      // const data = await res.json();
-      await simulateProgress(setProgress, setStatus);
+      setStatus("processing");
+      setProgress(20);
+
+      const form = new FormData();
+      form.append("file", video.file);
+      if (aSettings.musicFile) form.append("musicFile", aSettings.musicFile);
+      form.append(
+        "options",
+        JSON.stringify({
+          video: vSettings,
+          audio: {
+            musicLoop: aSettings.musicLoop,
+            loopVideo: aSettings.loopVideo,
+            audioMode: aSettings.audioMode,
+            musicVolume: aSettings.musicVolume,
+            audioStartOffset: aSettings.audioStartOffset,
+            fadeIn: aSettings.fadeIn,
+            fadeOut: aSettings.fadeOut,
+            normalize: aSettings.normalize,
+          },
+          subtitles: {},
+        })
+      );
+
+      setProgress(45);
+      const response = await fetch("/api/video/process", { method: "POST", body: form });
+      setProgress(80);
+
+      const data = await response.json() as {
+        error?: string;
+        details?: string;
+        originalSize?: number;
+        compressedSize?: number;
+        reductionPercent?: number;
+        outputUrl?: string;
+        outputName?: string;
+        outputFormat?: string;
+        hasAudio?: boolean;
+        isSimulated?: boolean;
+      };
+
+      if (!response.ok || data.error) {
+        throw new Error(data.details ? `${data.error ?? "Video processing failed"}: ${data.details}` : data.error ?? `Video processing failed (${response.status})`);
+      }
+
+      if (
+        typeof data.originalSize !== "number" ||
+        typeof data.compressedSize !== "number" ||
+        typeof data.reductionPercent !== "number" ||
+        typeof data.outputUrl !== "string" ||
+        typeof data.outputName !== "string" ||
+        typeof data.outputFormat !== "string"
+      ) {
+        throw new TypeError("Video processing returned an invalid response.");
+      }
+
       setResult({
-        originalSize: video.file.size,
-        compressedSize: Math.round(video.file.size * 0.45),
-        reductionPercent: 55,
-        // Use the original blob URL as a preview placeholder until FFmpeg is wired.
-        // This lets the processed player and download button work in the simulated flow.
-        outputUrl: video.objectUrl,
-        outputName: `processed_${video.file.name.replace(/\.[^.]+$/, "")}.${vSettings.format}`,
-        outputFormat: vSettings.format,
+        originalSize: data.originalSize,
+        compressedSize: data.compressedSize,
+        reductionPercent: data.reductionPercent,
+        outputUrl: data.outputUrl,
+        outputName: data.outputName,
+        outputFormat: data.outputFormat,
+        hasAudio: !!data.hasAudio,
+        isSimulated: false,
       });
+      setProgress(100);
       setStatus("completed");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Processing failed");
       setStatus("failed");
     }
-  }, [video, vSettings, aSettings, sSettings]);
+  }, [video, vSettings, aSettings]);
 
   const isProcessing = status === "uploading" || status === "processing";
   const canProcess   = video !== null && !isProcessing;
@@ -1166,11 +1520,11 @@ export default function VideoPage() {
             <p className="text-slate-400 max-w-lg leading-relaxed text-sm">
               Reduce size, change format, add background music, burn subtitles — all in one pass via FFmpeg.
             </p>
-            <div className="flex items-center gap-2 bg-amber-500/10 border border-amber-500/20 text-amber-300 text-xs font-medium px-4 py-2 rounded-xl">
+            <div className="flex items-center gap-2 bg-emerald-500/10 border border-emerald-500/20 text-emerald-300 text-xs font-medium px-4 py-2 rounded-xl">
               <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75 11.25 15 15 9.75m6 2.25a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
               </svg>
-              FFmpeg integration is in development — processing is simulated for now
+              FFmpeg processing is active on the server
             </div>
           </div>
 
@@ -1215,7 +1569,7 @@ export default function VideoPage() {
                       )}
                     </div>
                     {/* Original preview */}
-                    <VideoPlayer src={video.objectUrl} label="Original" accentClass="bg-slate-500" />
+                    <VideoPlayer key={video.objectUrl} src={video.objectUrl} label="Original" accentClass="bg-slate-500" />
                   </motion.div>
                 )}
               </AnimatePresence>
@@ -1301,17 +1655,3 @@ export default function VideoPage() {
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Simulation helper — replace when real API is wired
-// ─────────────────────────────────────────────────────────────────────────────
-
-async function simulateProgress(
-  setProgress: (n: number) => void,
-  setStatus: (s: JobStatus) => void,
-): Promise<void> {
-  for (let p = 0; p <= 40; p += 5) { setProgress(p); await tick(55); }
-  setStatus("processing");
-  for (let p = 42; p <= 100; p += 4) { setProgress(p); await tick(75); }
-}
-
-function tick(ms: number) { return new Promise<void>((r) => setTimeout(r, ms)); }
